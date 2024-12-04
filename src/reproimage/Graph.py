@@ -2,7 +2,7 @@ import copy
 import networkx as nx
 import numpy as np
 import SimpleITK as sitk
-from utils import cartesian_product
+from reproimage.utils import cartesian_product
 from numba import jit
 from scipy import spatial
 def get_node_degree_set(graph, degreeValue):
@@ -223,7 +223,7 @@ def find_distances_using_normal(coord1, coord2, VolumeImage, perm_array):
              counter = counter + 1
              y = (coord1).astype(np.double) + step*normal # take step in direction of normal vector
              currentPosition = np.empty_like(y)
-             np.round_(y, 0, currentPosition)
+             np.round(y, 0, currentPosition)
              if(int(currentPosition[0])>np.shape(VolumeImage)[0]-1):
                  currentValue = 0
              elif(int(currentPosition[1])>np.shape(VolumeImage)[1]-1):
@@ -340,3 +340,88 @@ def Strahler_numbering(di_graph :nx.DiGraph, inlet):
 
     nx.set_node_attributes(di_graph, strahler_mapping)
     return di_graph
+
+def get_graph_node_radii(graph, seg_img, coords, metric='mean', verbose = False, euclidean = False):
+    """
+    Radii ordering is as for graph.nodes()
+    :param graph:
+    :param seg_img:
+    :param coords:
+    :param metric:
+    :return:
+    """
+
+    distance = sitk.SignedMaurerDistanceMapImageFilter()
+    distance.SetBackgroundValue(1)
+    distance.SetInsideIsPositive(False)
+    distance.SquaredDistanceOff()
+    distance_img = distance.Execute(seg_img)
+    distance_img = sitk.GetArrayFromImage(distance_img)
+    coords = np.round(coords)
+    coords = coords.astype(int)
+    a, b, c = np.split(coords, 3, axis=1)
+    euclid_radii = distance_img[a,b,c] #currently in order of ascending node numbers
+    euclid_radii = euclid_radii[[x for x in graph.nodes]]
+    euclid_radii = np.squeeze(euclid_radii)
+    if not euclidean:
+        edge_radii = get_graph_branch_radii(graph, seg_img, coords, metric, verbose = verbose)
+        edges = graph.edges()
+        edge_index_map = {}
+        node_radii = []
+        for edge_index, edge in enumerate(edges):
+            edge_index_map[tuple(sorted(edge))] = edge_index
+        for node in graph.nodes():
+            radii = []
+            for edge in graph.edges(node):
+                radii.append(edge_radii[edge_index_map[tuple(sorted(edge))]])
+            if metric == 'mean':
+                node_radii.append(np.mean(radii))
+            elif metric == 'max':
+                node_radii.append(max(radii))
+        node_radii = np.nan_to_num(node_radii, nan=0.0)
+
+        node_radii[node_radii < 0] = euclid_radii[node_radii < 0]
+        euclid_radii[euclid_radii == 0] = node_radii[euclid_radii == 0]
+    euclid_radii[euclid_radii == 0] = np.min(euclid_radii[euclid_radii > 0])  # so no chance of div 0
+    if not euclidean:
+        difference = abs(node_radii - euclid_radii) / euclid_radii
+        cutoff = 0.33  # distances that are larger than cutoff are not used, 1 means that the distance is the same magnitude as the euclidean distance
+        node_radii[difference > cutoff] = euclid_radii[difference > cutoff]
+    if euclidean:
+        node_radii = euclid_radii
+    return np.array(node_radii)
+
+def get_graph_branch_radii(graph, seg_img, coords, metric='mean', verbose = False):
+    norm_vector_perms = np.array([0, -0.5, 0.5])
+    perm_array_for_normals = cartesian_product(norm_vector_perms, norm_vector_perms)
+    perm_array_for_normals = np.delete(perm_array_for_normals, 0, 0)
+    seg_array = sitk.GetArrayFromImage(seg_img)
+    radius_scalars = []
+    # enum = 0
+    for edge in graph.edges():
+        # enum +=1
+        # print(f"{enum} out of {graph.number_of_edges()}")
+        u, v = edge
+        if graph.get_edge_data(u, v) == None or graph.get_edge_data(u, v) == {}:
+            edge_nodes = [u, v]
+        else:
+            if 'path' not in graph.get_edge_data(u, v).keys():
+                edge_nodes = [u, v]
+            else:
+                # print(J_graph.get_edge_data(u, v))
+                edge_nodes = graph.get_edge_data(u, v)['path']
+        if len(edge_nodes) == 1:
+            edge_nodes = [u, edge_nodes[0], v]
+        edge_coords = coords[edge_nodes]
+        radius_scalars.append(radius_path(edge_coords, perm_array_for_normals, seg_array, metric))
+    if verbose:
+        print(len(radius_scalars))
+    return radius_scalars
+
+def get_num_junction_nodes(graph):
+    deg = nx.degree(graph)
+    degree_node_set = []
+    for node in graph.nodes:
+        if deg[node] > 2:
+            degree_node_set.append(node)
+    return len(degree_node_set), degree_node_set
