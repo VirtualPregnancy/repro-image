@@ -1,4 +1,5 @@
 import numpy as np
+from pathlib import Path
 def cubify(arr, roi_shape):
     """
     :param arr: array of values, intended to be 3D
@@ -53,3 +54,9 @@ def cartesian_product(*arrays):
     for i, a in enumerate(np.ix_(*arrays)):
         arr[...,i] = a
     return arr.reshape(-1, la)
+
+def confirm_directory(directory: Path):
+    if not directory.exists():
+        directory.mkdir(parents=True, exist_ok=False)
+        print(f"{directory} did not exist, it has been created")
+    return

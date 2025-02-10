@@ -107,3 +107,10 @@ def binary_fractal_window_series(img, window_sizes):
     frac_dim = calculate_fractal_dimension(fractal_dim_series, window_sizes, type='binary')
     return frac_dim
 
+def n_largest_components_filter(img, n_components = 0):
+    ccmp = sitk.ConnectedComponent(img)
+    ccmp_sort = sitk.RelabelComponent(ccmp, sortByObjectSize = True)
+    largest_comp = sitk.Threshold(ccmp_sort, upper=float(n_components), outsideValue=float(0))
+    largest_comp = sitk.Cast(largest_comp, sitk.sitkUInt8)
+
+    return largest_comp
