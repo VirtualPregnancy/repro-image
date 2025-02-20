@@ -65,7 +65,7 @@ def confirm_directory(directory: Path):
         print(f"{directory} did not exist, it has been created")
     return
 
-def av_wave(x_values, y_values, verbose=False):
+def mean_wave(x_values, y_values, verbose=False):
     """
     :param x_values: numpy array of x values
     :param y_values: numpy array of y values
