@@ -3,7 +3,9 @@ from pathlib import Path
 from scipy.signal import find_peaks
 from scipy.interpolate import interp1d
 from matplotlib import pyplot as plt
-
+import sqlite3
+import pandas as pd
+import copy
 def cubify(arr, roi_shape):
     """
     :param arr: array of values, intended to be 3D
@@ -110,17 +112,6 @@ def mean_wave(x_values, y_values, verbose=False):
         interp_y = interp1d(x_segment, y_segment, kind='linear', fill_value="extrapolate")(x_common)
         interpolated_waves.append(interp_y)
 
-    if verbose:
-        plt.figure(figsize=(10, 6))
-        plt.title("Set of Waveforms")
-        plt.xlabel("Time")
-        plt.ylabel("Amplitude")
-        for wave_index, waveform in enumerate(interpolated_waves):
-            plt.plot(x_common, waveform, label=f"Waveform {wave_index}")
-        plt.legend()
-        plt.grid(True)
-        plt.show()
-
     # Convert the list of interpolated waves to a NumPy array for calculations
     interpolated_waves_np = np.vstack(interpolated_waves)
 
@@ -128,20 +119,42 @@ def mean_wave(x_values, y_values, verbose=False):
     average_wave = np.mean(interpolated_waves_np, axis=0)
     std_wave = np.std(interpolated_waves_np, axis=0)
 
+    if verbose:
+        plt.figure(figsize=(10, 6))
+        plt.title("Set of Waveforms")
+        plt.xlabel("Time")
+        plt.ylabel("Amplitude")
+        for wave_index, waveform in enumerate(interpolated_waves):
+            plt.plot(x_common, waveform, label=f"Waveform {wave_index}")
+        plt.plot(x_common, average_wave, label='Average wave', linestyle='-.')
+        plt.plot(x_common, average_wave+std_wave, label='Average wave + SD', linestyle='--')
+        plt.plot(x_common, average_wave-std_wave, label='Average wave - SD', linestyle='--')
+        plt.legend()
+        plt.grid(True)
+        plt.show()
+
+
+
     # Filter out waves outside the range of average ± standard deviation
     threshold_percentage = 80
 
     filtered_waves = []
-    for wave in interpolated_waves_np:
-        # Calculate the percentage of points that meet the OR condition
-        within_range = (wave >= (average_wave - std_wave)) & (
-                    wave <= (average_wave + std_wave))  # Points above or equal to lower bound
-        percentage_within_range = np.sum(within_range) / len(wave) * 100
+    while filtered_waves == []:
+        for wave in interpolated_waves_np:
+            # Calculate the percentage of points that meet the OR condition
+            within_range = (wave >= (average_wave - std_wave)) & (
+                        wave <= (average_wave + std_wave))  # Points above or equal to lower bound
+            percentage_within_range = np.sum(within_range) / len(wave) * 100
 
-        # Include the wave if the percentage is above the threshold
-        if percentage_within_range >= threshold_percentage:
-            filtered_waves.append(wave)
+            # Include the wave if the percentage is above the threshold
+            if percentage_within_range >= threshold_percentage:
+                filtered_waves.append(wave)
+        threshold_percentage -= 5
 
+    if verbose:
+        print(f"{len(interpolated_waves)} waveforms included in the calculationg for the average waveform,"
+              f"using a cutoff proportion of {threshold_percentage} % for points within one standard deviation of the "
+              f"raw native waveform")
     # Recalculate the average and standard deviation with the filtered waves
     filtered_waves_np = np.vstack(filtered_waves)
     new_average_wave = np.mean(filtered_waves_np, axis=0)
@@ -156,3 +169,159 @@ def mean_wave(x_values, y_values, verbose=False):
         plt.show()
 
     return new_average_wave, x_common
+
+
+class MetaData:
+    def __init__(self, dataframe=None, database_path=None):
+        self.dataframe = copy.deepcopy(dataframe)
+        if (dataframe is not None) ^ bool(database_path):
+            if database_path:
+                self.dataframe = copy.deepcopy(self.__parse_metadata_db(database_path))
+
+            assert self.dataframe.index.is_unique, (
+                "Dataframe indexes must be unique, there is a risk using the truncated hash "
+                "values but the risk is small")
+        else:
+            print("INITIALISATION ERROR, user should provide ONE of <dataframe> or <path to a sql database>\n"
+                  "NOT both or neither")
+
+    @classmethod
+    def from_dataframe(cls, dataframe):
+        return cls(dataframe=dataframe)
+
+    @classmethod
+    def from_db_path(cls, db_path):
+        return cls(database_path=db_path)
+
+    def __process_row(self, row):
+        row = list(row)
+        row[0] = int(row[0].split('-')[-1])  # truncate Daphne-<number> to just <number>
+        row[5] = row[5][:8]  # truncate the image hash to the first 8 characters
+        return row
+
+    def __parse_metadata_db(self, sql_database):
+        assert sql_database.exists(), "Invalid database provided, it does not exist"
+        # read db into RAM as pandas dataframe
+        con = sqlite3.connect(sql_database)
+        cur = con.cursor()
+        res = cur.execute("PRAGMA table_info(daphne_metadata)")
+        cols = [x[1] for x in res.fetchall()]
+        col_str = ','.join(cols)
+        res = cur.execute(f"SELECT {col_str} FROM daphne_metadata")
+        metadata = res.fetchall()
+        con.close()
+
+        cols[0] = 'Daphne Number'
+        metadata = [self.__process_row(x) for x in metadata]
+        dataframe = pd.DataFrame(metadata, columns=cols).set_index('image_hash')
+        pd.options.display.max_columns = len(cols)
+        dataframe[cols[7:]] = dataframe[cols[7:]].apply(pd.to_numeric, errors='coerce')
+        dataframe['HR'] = dataframe['HR'].astype(int)
+        dataframe['datetime'] = pd.to_datetime(dataframe['dateofexam'],
+                                                                 format='%Y%m%d')
+        # drop columns with no unique data
+        for col in dataframe.columns:
+            if dataframe[col].unique().size == 1:
+                print(f"Dropping {col} as all rows have the value: {dataframe[col].unique()[0]}")
+                dataframe.drop(col, axis=1, inplace=True)
+
+        return dataframe
+
+    def __get__column(self, col):
+        return self.dataframe[col]
+
+    def summary_data(self):
+        print(self.dataframe.describe(include='all'))
+
+    def mean(self, column):
+        print(self.__get__column(column).mean())
+
+    def Get_Fields(self, cols):
+        return MetaData.from_dataframe(self.dataframe[cols])
+
+    def Get_Field_Names(self):
+        fields = self.dataframe.columns.to_list()
+        return fields
+
+    def Get_Directories(self):
+        dirs = {}
+        for daphne_number in self.dataframe['Daphne Number'].unique():
+            image_dir = f"Primary/leap/doppler/Daphne-{daphne_number}"
+            waveform_dir = f"Derivative/leap/doppler/Daphne-{daphne_number}"
+            dirs[daphne_number] = {'image directory': image_dir, "waveform directory": waveform_dir}
+        return dirs
+
+    def Get_Daphnes(self, daphnes):
+        return MetaData.from_dataframe(self.dataframe[self.dataframe['Daphne Number'].isin(daphnes)])
+
+    def __get__uniques(self, series):
+        return series.unique()
+
+    def Get_Vessels(self):
+        series = self.__get__column('prefix')
+        return self.__get__uniques(series).tolist()
+
+    def Get_Index_as_array(self):
+        return self.dataframe.index.to_numpy()
+
+    def Get_Num_Entries(self):
+        return self.dataframe.shape[0]
+    def Query(self, query, local_dictionary=None):
+        try:
+            if local_dictionary:
+                subset = self.dataframe.query(query, local_dict = local_dictionary)
+            else:
+                subset = self.dataframe.query(query)
+            return MetaData.from_dataframe(subset)
+        except:
+            print("Error executing your query, sql like queries are accepted e.g:\n"
+                  "`Daphne Number` == 44 and HR < 120 or\n"
+                  "PI > 1"
+                  "prefix == \"LT\""
+                  "You can refer to variables in the environment by prefixing them with an ‘@’ character like @a + b."
+                  "You can refer to column names that are not valid Python variable names by surrounding them in backticks.")
+        return
+    def Get_Earliest_Scan_Datetime(self):
+        return self.dataframe['datetime'].min()
+
+    def Get_Latest_Scan_Datetime(self):
+        return self.dataframe['datetime'].max()
+
+    def Sort(self, field, ascending=True):
+        """Sort the database by the values in the <field>, ascending by default controlled by the <ascending> parameter,
+        this happens in place"""
+        self.dataframe.sort_values(field, axis='columns', ascending=ascending)
+    def Summary(self, verbose=False):
+        num_images = self.Get_Num_Entries()
+        fields = self.Get_Field_Names()
+        if 'Daphne Number' in fields:
+            unique_patients = self.dataframe['Daphne Number'].unique().size
+            print(f"This data containts information from {unique_patients} distinct patient(s)")
+        num_fields = len(fields)
+        print(
+            f"This data contains information from {num_images} unique images, each with {num_fields} fields, {fields}")
+        if 'prefix' in fields:
+            vessels = self.Get_Vessels()
+            if 'N/A' in vessels:
+                unknown_index = vessels.index('N/A')
+                print(
+                    f"There are {len(vessels) - 1} distinct vessesl that are imaged in this dataset, {[x for x in vessels if x != 'N/A']},including some that have "
+                    f"not been specified, these are labelled {vessels[unknown_index]}")
+            else:
+                print(f"There are {len(vessels)} distinct vessesl, {vessels} that are imaged in this dataset")
+        if verbose:
+            self.summary_data()
+
+    def Get_Image_Data(self, im_hash):
+        """"accepts either singular argumebts specifying a single image index, or a list of image indices"""
+        return self.dataframe.loc[im_hash]
+
+    def Generate_timeDelta(self, delta_key, delta_value):
+        if delta_key in ['day', 'days', 'month', 'months', 'year', 'years']:
+            return pd.Timedelta(delta_value, unit=delta_key)
+        else:
+            print("USEAGE ERROR: correct useage is Generate_timeDelta(time_units, time_value\n"
+                  "Your units must be one of 'day', 'days', 'month', 'months', 'year', 'years'")
+
+    def to_numpy(self):
+        return self.dataframe.to_numpy()
