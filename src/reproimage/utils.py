@@ -76,13 +76,24 @@ def mean_wave(x_values, y_values, verbose=False):
     """
     wave_amplitude = y_values.max()-y_values.min()
 
-    trough_indices, _ = find_peaks(-1*y_values, prominence=wave_amplitude/4)  # Negate y_values to find minima
+    all_trough_indices, _ = find_peaks(-1*y_values)  # Negate y_values to find minima
+    peak_indices, _ = find_peaks(y_values, prominence=wave_amplitude / 4)  # Negate y_values to find minima
+    ## Want to find the last local minima that has occured before a main peak
+    trough_indices = []
+    for peak in peak_indices:
+        trough_loc = np.where(all_trough_indices<peak)[0]
+        trough_loc = trough_loc[-1]
+        trough_indices.append(all_trough_indices[trough_loc])
+
 
     interpolated_waves = []
     if verbose:
         plt.figure(figsize=(10, 6))
         plt.plot(x_values, y_values, label="Waveform", color='blue')
-        plt.scatter(x_values[trough_indices], y_values[trough_indices], color='red', label='Troughs', zorder=5)
+        plt.scatter(x_values[all_trough_indices], y_values[all_trough_indices], color='blue', label='Troughs', zorder=5)
+        plt.scatter(x_values[peak_indices], y_values[peak_indices], color='black', label='Peaks', zorder=5)
+        plt.scatter(x_values[trough_indices], y_values[trough_indices], color='red', label='Final Troughs', zorder=5)
+
         plt.title("Waveform with Trough Points")
         plt.xlabel("Time")
         plt.ylabel("Amplitude")
@@ -118,6 +129,7 @@ def mean_wave(x_values, y_values, verbose=False):
     # Calculate the initial average and standard deviation
     average_wave = np.mean(interpolated_waves_np, axis=0)
     std_wave = np.std(interpolated_waves_np, axis=0)
+    amplitude_of_ave = np.max(average_wave)-np.min(average_wave)
 
     if verbose:
         plt.figure(figsize=(10, 6))
@@ -133,23 +145,28 @@ def mean_wave(x_values, y_values, verbose=False):
         plt.grid(True)
         plt.show()
 
-
-
     # Filter out waves outside the range of average ± standard deviation
     threshold_percentage = 80
 
     filtered_waves = []
-    while filtered_waves == []:
-        for wave in interpolated_waves_np:
-            # Calculate the percentage of points that meet the OR condition
-            within_range = (wave >= (average_wave - std_wave)) & (
-                        wave <= (average_wave + std_wave))  # Points above or equal to lower bound
-            percentage_within_range = np.sum(within_range) / len(wave) * 100
+    excluded_waves = []
+    count_excluded = 0
+    for wave in interpolated_waves_np:
+        # Calculate the percentage of points that meet the OR condition
+        within_range = (wave >= (average_wave - 0.2*amplitude_of_ave)) & (
+                    wave <= (average_wave + 0.2*amplitude_of_ave))  # Points above or equal to lower bound
+        percentage_within_range = np.sum(within_range) / len(wave) * 100
+        # Include the wave if the percentage is above the threshold
+        if percentage_within_range >= threshold_percentage:
+            filtered_waves.append(wave)
+        else:
+            count_excluded =+ 1
+            excluded_waves.append(wave)
+    if verbose:
+        print("Waves filtered, num excluded", count_excluded)
 
-            # Include the wave if the percentage is above the threshold
-            if percentage_within_range >= threshold_percentage:
-                filtered_waves.append(wave)
-        threshold_percentage -= 5
+
+
 
     if verbose:
         print(f"{len(interpolated_waves)} waveforms included in the calculationg for the average waveform,"
@@ -165,6 +182,7 @@ def mean_wave(x_values, y_values, verbose=False):
         plt.xlabel("Time")
         plt.ylabel("Amplitude")
         plt.plot(x_common, new_average_wave)
+        #plt.plot(x_common, excluded_waves[0])
         plt.grid(True)
         plt.show()
 
