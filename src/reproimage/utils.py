@@ -1,3 +1,5 @@
+import inspect
+
 import numpy as np
 from pathlib import Path
 from scipy.signal import find_peaks
@@ -81,9 +83,10 @@ def mean_wave(x_values, y_values, verbose=False):
     ## Want to find the last local minima that has occured before a main peak
     trough_indices = []
     for peak in peak_indices:
-        trough_loc = np.where(all_trough_indices<peak)[0]
-        trough_loc = trough_loc[-1]
-        trough_indices.append(all_trough_indices[trough_loc])
+        trough_loc = np.where(all_trough_indices<peak)[0].tolist()
+        if trough_loc:
+            trough_loc = trough_loc[-1]
+            trough_indices.append(all_trough_indices[trough_loc])
 
 
     interpolated_waves = []
@@ -284,12 +287,13 @@ class MetaData:
 
     def Get_Num_Entries(self):
         return self.dataframe.shape[0]
-    def Query(self, query, local_dictionary=None):
+    def Query(self, query):
         try:
-            if local_dictionary:
-                subset = self.dataframe.query(query, local_dict = local_dictionary)
-            else:
-                subset = self.dataframe.query(query)
+            caller_frame = inspect.currentframe().f_back
+            caller_locals = caller_frame.f_locals
+            caller_globals = caller_frame.f_globals
+
+            subset = self.dataframe.query(query, local_dict = caller_locals, global_dict=caller_globals)
             return MetaData.from_dataframe(subset)
         except:
             print("Error executing your query, sql like queries are accepted e.g:\n"
