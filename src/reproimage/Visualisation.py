@@ -1,6 +1,6 @@
 import numpy as np
 import pyvista as pv
-
+import networkx as nx
 def remap_node_field_for_vis(graph, field):
     """
     graph - nx.Graph
@@ -34,7 +34,7 @@ def generate_visualisation_arrays(coords, edges):
     connections_with_padding = np.vstack((padding, remapped_connections.T)).T
     return new_coords, connections_with_padding
 
-def visualise_graph_and_field(graph, coords, field, field_name='radii', title='', need_remap = True):
+def visualise_graph_and_field(graph: nx.graph, coords: np.array, field, field_name='radii', title='', need_remap = True):
     if title == '':
         title = f'{field_name} visualisation'
     if need_remap:
@@ -50,4 +50,13 @@ def visualise_graph_and_field(graph, coords, field, field_name='radii', title=''
     plotter.add_mesh(pod_tube, render_lines_as_tubes=True, show_scalar_bar=False)
     plotter.add_scalar_bar(field_name, position_x=0.25)
     plotter.camera_position = 'xz'
+    plotter.show()
+
+def visualise_graph(graph: nx.graph, coords: np.array, radius: float = 1.0):
+    vis_coords, vis_connections = generate_visualisation_arrays(coords,
+                                                                np.array(graph.edges()))
+    plotter = pv.Plotter()
+    pod = pv.PolyData(vis_coords, lines=vis_connections, n_lines=vis_connections.shape[0])
+    pod_tube = pod.tube(radius=radius)
+    plotter.add_mesh(pod_tube, render_lines_as_tubes=True)
     plotter.show()
