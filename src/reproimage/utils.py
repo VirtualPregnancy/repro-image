@@ -168,9 +168,6 @@ def mean_wave(x_values, y_values, verbose=False):
     if verbose:
         print("Waves filtered, num excluded", count_excluded)
 
-
-
-
     if verbose:
         print(f"{len(interpolated_waves)} waveforms included in the calculationg for the average waveform,"
               f"using a cutoff proportion of {threshold_percentage} % for points within one standard deviation of the "
