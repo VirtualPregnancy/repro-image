@@ -1,5 +1,5 @@
 import inspect
-
+import sys
 import numpy as np
 from pathlib import Path
 from scipy.signal import find_peaks
@@ -369,3 +369,43 @@ def jackknife_variance_filter(data):
             converged = True
     return data
 
+def get_image_metadata_from_log_file(file):
+    """
+    This function takes in the file pointer for a reconstruction log file, reads the file n pixels in x,y,z directions,
+    and reads the spatial data for the reconstructed images
+    """
+    with open(file) as f:
+        im_size = [0, 0, 0]
+        spacing = []
+        for x in f:
+            if "Result Image Width" in x:
+                im_size[0] = int(x.split('=')[-1])
+            elif "Result Image Height" in x:
+                im_size[1] = int(x.split('=')[-1])
+            elif "Sections Count" in x:
+                im_size[2] = int(x.split('=')[-1])
+            elif "Image Pixel Size" in x:
+                spacing = tuple([float(
+                    x.split("=")[-1])]) * 3  # known bug, this line picks up first camera pixel, then actual pixel size
+            elif "Result File Type" in x:
+                formatString = x.split("=")[-1]
+                if "TIFF" in formatString or "TIF" in formatString:
+                    fileformat = ".tif"
+                elif "BMP" in formatString:
+                    fileformat = ".bmp"
+                else:
+                    print(f"Error: no database match for {formatString}")
+
+    return im_size, spacing, fileformat
+
+class Suppressor(object):
+
+    def __enter__(self):
+        self.stdout = sys.stdout
+        sys.stdout = self
+
+    def __exit__(self, type, value, traceback):
+        sys.stdout = self.stdout
+        if type is not None:
+            pass
+            # Do normal exception handling
