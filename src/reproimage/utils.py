@@ -1,5 +1,5 @@
 import inspect
-
+import sys
 import numpy as np
 from pathlib import Path
 from scipy.signal import find_peaks
@@ -88,7 +88,6 @@ def mean_wave(x_values, y_values, verbose=False):
             trough_loc = trough_loc[-1]
             trough_indices.append(all_trough_indices[trough_loc])
 
-
     interpolated_waves = []
     if verbose:
         plt.figure(figsize=(10, 6))
@@ -129,6 +128,8 @@ def mean_wave(x_values, y_values, verbose=False):
     # Convert the list of interpolated waves to a NumPy array for calculations
     interpolated_waves_np = np.vstack(interpolated_waves)
 
+    interpolated_waves_np = jackknife_variance_filter(interpolated_waves_np) # filter based on variance using jackknife
+    # subsampling
     # Calculate the initial average and standard deviation
     average_wave = np.mean(interpolated_waves_np, axis=0)
     std_wave = np.std(interpolated_waves_np, axis=0)
@@ -142,8 +143,8 @@ def mean_wave(x_values, y_values, verbose=False):
         for wave_index, waveform in enumerate(interpolated_waves):
             plt.plot(x_common, waveform, label=f"Waveform {wave_index}")
         plt.plot(x_common, average_wave, label='Average wave', linestyle='-.')
-        plt.plot(x_common, average_wave+std_wave, label='Average wave + SD', linestyle='--')
-        plt.plot(x_common, average_wave-std_wave, label='Average wave - SD', linestyle='--')
+        plt.plot(x_common, average_wave+0.2*amplitude_of_ave, label='Average wave + ampl/5', linestyle='--')
+        plt.plot(x_common, average_wave-0.2*amplitude_of_ave, label='Average wave - ampl/5', linestyle='--')
         plt.legend()
         plt.grid(True)
         plt.show()
@@ -154,6 +155,7 @@ def mean_wave(x_values, y_values, verbose=False):
     filtered_waves = []
     excluded_waves = []
     count_excluded = 0
+
     for wave in interpolated_waves_np:
         # Calculate the percentage of points that meet the OR condition
         within_range = (wave >= (average_wave - 0.2*amplitude_of_ave)) & (
@@ -163,19 +165,20 @@ def mean_wave(x_values, y_values, verbose=False):
         if percentage_within_range >= threshold_percentage:
             filtered_waves.append(wave)
         else:
-            count_excluded =+ 1
+            count_excluded += 1
             excluded_waves.append(wave)
     if verbose:
         print("Waves filtered, num excluded", count_excluded)
 
     if verbose:
-        print(f"{len(interpolated_waves)} waveforms included in the calculationg for the average waveform,"
-              f"using a cutoff proportion of {threshold_percentage} % for points within one standard deviation of the "
-              f"raw native waveform")
+        print(f"{len(filtered_waves)} waveforms included in the Calculation for the average waveform,"
+              f"using a cutoff proportion of {threshold_percentage} % for points within 20% of the mean waveform with "
+              f"average waveform amplitude as the distance raw native waveform")
     # Recalculate the average and standard deviation with the filtered waves
     filtered_waves_np = np.vstack(filtered_waves)
     new_average_wave = np.mean(filtered_waves_np, axis=0)
     new_std_wave = np.std(filtered_waves_np, axis=0)
+
     if verbose:
         plt.figure(figsize=(10, 6))
         plt.title("Average waveform")
@@ -344,3 +347,66 @@ class MetaData:
 
     def to_numpy(self):
         return self.dataframe.to_numpy()
+
+def get_image_metadata_from_log_file(file):
+    """
+    This function takes in the file pointer for a reconstruction log file, reads the file n pixels in x,y,z directions,
+    and reads the spatial data for the reconstructed images
+    """
+    with open(file) as f:
+        im_size = [0, 0, 0]
+        spacing = []
+        for x in f:
+            if "Result Image Width" in x:
+                im_size[0] = int(x.split('=')[-1])
+            elif "Result Image Height" in x:
+                im_size[1] = int(x.split('=')[-1])
+            elif "Sections Count" in x:
+                im_size[2] = int(x.split('=')[-1])
+            elif "Image Pixel Size" in x:
+                spacing = tuple([float(
+                    x.split("=")[-1])]) * 3  # known bug, this line picks up first camera pixel, then actual pixel size
+            elif "Result File Type" in x:
+                formatString = x.split("=")[-1]
+                if "TIFF" in formatString or "TIF" in formatString:
+                    fileformat = ".tif"
+                elif "BMP" in formatString:
+                    fileformat = ".bmp"
+                else:
+                    print(f"Error: no database match for {formatString}")
+
+    return im_size, spacing, fileformat
+
+class Suppressor(object):
+
+    def __enter__(self):
+        self.stdout = sys.stdout
+        sys.stdout = self
+
+    def __exit__(self, type, value, traceback):
+        sys.stdout = self.stdout
+        if type is not None:
+            pass
+            # Do normal exception handling
+
+def jackknife_variance_filter(data):
+    converged = False
+    while not converged:
+        pop_var = np.var(data,axis=0)
+        subgroup_vars = []
+        for i in range(data.shape[0]):
+            sample = np.delete(data,i, axis=0)
+            subgroup_vars.append(np.var(sample, axis=0))
+
+        subgroup_vars = np.asarray(subgroup_vars)
+        subgroup_vars = np.abs(pop_var-subgroup_vars)
+        subgroup_vars = np.mean(subgroup_vars, axis=1)
+
+        feature = int(np.argmax(subgroup_vars))
+
+        var_without_feature = np.mean(np.var(np.delete(data, feature, axis=0), axis=0))
+        if subgroup_vars[feature] >= var_without_feature * 1.5:
+            data = np.delete(data, feature, axis=0)
+        else:
+            converged = True
+    return data
