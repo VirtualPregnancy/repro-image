@@ -127,6 +127,8 @@ def mean_wave(x_values, y_values, verbose=False):
 
     # Convert the list of interpolated waves to a NumPy array for calculations
     interpolated_waves_np = np.vstack(interpolated_waves)
+
+    interpolated_waves_np = jackknife_variance_filter(interpolated_waves_np) # filter based on variance using jackknife
     # subsampling
     # Calculate the initial average and standard deviation
     average_wave = np.mean(interpolated_waves_np, axis=0)
@@ -386,3 +388,25 @@ class Suppressor(object):
         if type is not None:
             pass
             # Do normal exception handling
+
+def jackknife_variance_filter(data):
+    converged = False
+    while not converged:
+        pop_var = np.var(data,axis=0)
+        subgroup_vars = []
+        for i in range(data.shape[0]):
+            sample = np.delete(data,i, axis=0)
+            subgroup_vars.append(np.var(sample, axis=0))
+
+        subgroup_vars = np.asarray(subgroup_vars)
+        subgroup_vars = np.abs(pop_var-subgroup_vars)
+        subgroup_vars = np.mean(subgroup_vars, axis=1)
+
+        feature = int(np.argmax(subgroup_vars))
+
+        var_without_feature = np.mean(np.var(np.delete(data, feature, axis=0), axis=0))
+        if subgroup_vars[feature] >= var_without_feature * 1.5:
+            data = np.delete(data, feature, axis=0)
+        else:
+            converged = True
+    return data
