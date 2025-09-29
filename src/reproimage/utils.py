@@ -88,7 +88,6 @@ def mean_wave(x_values, y_values, verbose=False):
             trough_loc = trough_loc[-1]
             trough_indices.append(all_trough_indices[trough_loc])
 
-
     interpolated_waves = []
     if verbose:
         plt.figure(figsize=(10, 6))
@@ -128,7 +127,7 @@ def mean_wave(x_values, y_values, verbose=False):
 
     # Convert the list of interpolated waves to a NumPy array for calculations
     interpolated_waves_np = np.vstack(interpolated_waves)
-
+    # subsampling
     # Calculate the initial average and standard deviation
     average_wave = np.mean(interpolated_waves_np, axis=0)
     std_wave = np.std(interpolated_waves_np, axis=0)
@@ -142,8 +141,8 @@ def mean_wave(x_values, y_values, verbose=False):
         for wave_index, waveform in enumerate(interpolated_waves):
             plt.plot(x_common, waveform, label=f"Waveform {wave_index}")
         plt.plot(x_common, average_wave, label='Average wave', linestyle='-.')
-        plt.plot(x_common, average_wave+std_wave, label='Average wave + SD', linestyle='--')
-        plt.plot(x_common, average_wave-std_wave, label='Average wave - SD', linestyle='--')
+        plt.plot(x_common, average_wave+0.2*amplitude_of_ave, label='Average wave + ampl/5', linestyle='--')
+        plt.plot(x_common, average_wave-0.2*amplitude_of_ave, label='Average wave - ampl/5', linestyle='--')
         plt.legend()
         plt.grid(True)
         plt.show()
@@ -154,6 +153,7 @@ def mean_wave(x_values, y_values, verbose=False):
     filtered_waves = []
     excluded_waves = []
     count_excluded = 0
+
     for wave in interpolated_waves_np:
         # Calculate the percentage of points that meet the OR condition
         within_range = (wave >= (average_wave - 0.2*amplitude_of_ave)) & (
@@ -163,19 +163,20 @@ def mean_wave(x_values, y_values, verbose=False):
         if percentage_within_range >= threshold_percentage:
             filtered_waves.append(wave)
         else:
-            count_excluded =+ 1
+            count_excluded += 1
             excluded_waves.append(wave)
     if verbose:
         print("Waves filtered, num excluded", count_excluded)
 
     if verbose:
-        print(f"{len(interpolated_waves)} waveforms included in the calculationg for the average waveform,"
-              f"using a cutoff proportion of {threshold_percentage} % for points within one standard deviation of the "
-              f"raw native waveform")
+        print(f"{len(filtered_waves)} waveforms included in the Calculation for the average waveform,"
+              f"using a cutoff proportion of {threshold_percentage} % for points within 20% of the mean waveform with "
+              f"average waveform amplitude as the distance raw native waveform")
     # Recalculate the average and standard deviation with the filtered waves
     filtered_waves_np = np.vstack(filtered_waves)
     new_average_wave = np.mean(filtered_waves_np, axis=0)
     new_std_wave = np.std(filtered_waves_np, axis=0)
+
     if verbose:
         plt.figure(figsize=(10, 6))
         plt.title("Average waveform")
