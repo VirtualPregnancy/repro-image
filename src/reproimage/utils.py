@@ -386,6 +386,12 @@ class Suppressor(object):
         if type is not None:
             pass
 
+    def write(self, _):
+        pass  # ignore all writes
+
+    def flush(self):
+        pass  # required by some code that calls flush
+
 def invert_dictionary(dictionary):
     inverted_map = {v: k for k, v in dictionary.items()}
     return inverted_map
