@@ -385,4 +385,7 @@ class Suppressor(object):
         sys.stdout = self.stdout
         if type is not None:
             pass
-            # Do normal exception handling
+
+def invert_dictionary(dictionary):
+    inverted_map = {v: k for k, v in dictionary.items()}
+    return inverted_map

@@ -24,6 +24,8 @@ def junction_node_subgraph(graph):
     :return: a series reduced tree with no degree 2 nodes
     """
     jgraph = copy.deepcopy(graph)
+    print(nx.is_frozen(jgraph))
+    jgraph = nx.Graph(jgraph)
     # Iterate through the edges and remove attributes
     for u, v, attrs in jgraph.edges(data=True):
         for attr_key in list(attrs.keys()):
@@ -425,3 +427,23 @@ def get_num_junction_nodes(graph):
         if deg[node] > 2:
             degree_node_set.append(node)
     return len(degree_node_set), degree_node_set
+
+def get_points_from_exnode(exnode_obj):
+    dimension = 3
+
+    points = np.zeros([exnode_obj.num_nodes+1, dimension])
+    print(f"Processing nodes")
+    for node in exnode_obj.sections[0].nodes:
+        points[node.number, :] = node.values
+    return points
+
+def edges_from_exelem(exelem_obj):
+    edges = list()
+    print(f"Processing elements")
+    for element in exelem_obj.elements:
+        edges.append(element.nodes)
+    return edges
+
+def direct_UAG_from_inlet(UAG, inlet):
+    directed_graph = nx.bfs_tree(UAG, inlet)
+    return directed_graph
