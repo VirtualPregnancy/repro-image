@@ -173,7 +173,8 @@ def image_stack_to_volume(reconstruction_directory, output_directory, sample_ide
     number_of_stacks_in_mosaic_layer = ceil(n_images / resamplinglayer_size)
     stack_remainder = n_images % resamplinglayer_size
 
-    output_spacing = tuple([dim_spacing * isotropic_downsample_dim for dim_spacing in raw_im_stack_spacing]) * 3
+    output_spacing = tuple([dim_spacing * isotropic_downsample_dim for dim_spacing in raw_im_stack_spacing])
+
     mosaic_piece_size = [0.0, 0.0, 0.0]
     output_size_ds = [0, 0, 0]
 
