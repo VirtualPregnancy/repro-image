@@ -117,7 +117,6 @@ def n_largest_components_filter(img, n_components = 0):
 
     return largest_comp
 
-
 def image_stack_to_volume(reconstruction_directory, output_directory, sample_identifier, isotropic_downsample_dim=8,
                     grid_size=[8, 8, 8], specified_mosaic_piece_size=[], raw_im_stack_size=[], raw_im_stack_spacing=[]):
     if not os.path.isdir(output_directory):
@@ -174,7 +173,7 @@ def image_stack_to_volume(reconstruction_directory, output_directory, sample_ide
     number_of_stacks_in_mosaic_layer = ceil(n_images / resamplinglayer_size)
     stack_remainder = n_images % resamplinglayer_size
 
-    output_spacing = tuple([raw_im_stack_spacing[0] * isotropic_downsample_dim]) * 3
+    output_spacing = tuple([dim_spacing * isotropic_downsample_dim for dim_spacing in raw_im_stack_spacing]) * 3
     mosaic_piece_size = [0.0, 0.0, 0.0]
     output_size_ds = [0, 0, 0]
 
