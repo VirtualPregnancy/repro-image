@@ -375,3 +375,602 @@ def image_stack_to_volume(reconstruction_directory, output_directory, sample_ide
 def downsample(reconstruction_directory, output_directory, sample_identifier, isotropic_downsample_dim):
     return image_stack_to_volume(reconstruction_directory, output_directory, sample_identifier, isotropic_downsample_dim,
                            grid_size=[1, 1, 1])
+
+"""This code outlines the mosaic class for working with discretised large medical images"""
+import os
+# noinspection SpellCheckingInspection
+import SimpleITK as sitk
+import numpy as np
+from functools import partial
+from toby_utils import get_subregion
+class mosaic:
+    def __init__(self, directory):
+        # TO DO check directory validity
+        self.directory = directory
+        # search dir for mosaic_mapping file
+        mapfile = ""
+        mapping_file = 'mosaic_mapping.txt'
+        file_list = os.listdir(directory)
+        while file_list:
+            mapfile = file_list.pop()
+            if mapping_file in mapfile and mapfile[0] != '.':
+                mapping_file = mapfile
+                self.mapping_file = mapfile
+                break
+        if mapfile != mapping_file:
+            print(f"cannot initialise mosaic object without spatial mapping information provided by {mapping_file}")
+            raise SystemExit
+        # make some kind of error code pop up
+
+        self.elements = {}
+        self.process_mapping_file(mapfile)  # this function reads the spatial mapping information in file,
+        # setting the elements, and spacing attributes of the mosaic class
+        self.n_pieces = max(self.elements.keys())+1 # adding one for zero indexing
+        self.pieces = {}
+        self.create_adjacency_matrix()
+        self.function_history = []
+
+    # noinspection PyAttributeOutsideInit
+    def process_mapping_file(self, file):
+        """
+        Parameters
+        ----------
+        @file - mapping_file.txt
+
+        Returns
+        -------
+
+        """
+        file_path = os.path.join(self.directory, file)
+        with open(file_path, 'r') as f:
+            for line in f.readlines():
+                try:
+                    a, b = line.split(sep=',', maxsplit=1)
+                    if a.isnumeric():
+                        b = b.replace('[', "")
+                        b = b.replace(']', "")
+                        b = b.replace('(', "")
+                        b = b.replace(')', "")
+                        b = b.split(',')
+                        self.elements[int(a)] = tuple([float(x) for x in b])
+                    elif 'spacing' in a:
+                        b = b.replace('(', "")
+                        b = b.replace(')', "")
+                        b = b.split(',')
+                        self.spacing = tuple([float(x) for x in b])
+                    elif a == 'total mosaic size':
+                        b = b.replace('[', "")
+                        b = b.replace(']', "")
+                        b = b.split(',')
+                        self.macro_size = [int(x) for x in b]
+                    elif 'original' in a:
+                        self.original_directory = b
+                    elif 'factor' in a:
+                        self.downsample_factor = int(b)
+                    elif a == 'mosiac piece size':
+                        b = b.replace('[', "")
+                        b = b.replace(']', "")
+                        b = b.split(',')
+                        self.piece_size = [int(x) for x in b]
+                    elif a == 'Grid size':
+                        b = b.replace('[', '')
+                        b = b.replace(']', '')
+                        b = b.split(',')
+                        if len(b) == 1:
+                            # for historic mosaic objects with isotropic/single parameter grid sizing
+                            self.grid_size = tuple([int(b[0]) for x in range(0,3)])
+                        else:
+                            self.grid_size = tuple([int(x) for x in b])
+                    elif a == 'identifier':
+                        self.identifier = b.strip()
+                except:
+                    print(line)
+
+            write_flag = False
+            for prop in ['spacing', 'macro_size', 'original_directory', 'downsample_factor', 'piece_size', 'grid_size',
+                         'identifier']:
+                if not hasattr(self, prop):
+                    self.prompt_for_attribute(prop)
+                    write_flag = True
+            if write_flag:
+                self.write_mosaic_mapping_file(self.directory)
+
+    # @property
+    # def grid_size(self):
+    #     print("Getting value...")
+    #     return self.grid_size
+    #
+    # @grid_size.setter
+    # def grid_size(self, value):
+    #     print("Setting value...")
+    #     self.grid_size = int(value)
+
+    def prompt_for_attribute(self, prop):
+        prop_dict = {'spacing': 'spacing', 'macro_size': 'total mosaic size',
+                     'original_directory': 'original reconstruction location',
+                     'down sample_factor': 'down sampling factor', 'piece_size': 'mosaic piece size',
+                     'grid_size': 'Grid size', "identifier": "identifier"}
+        if prop != 'identifier':
+            print(
+                f'Mosaic {self.identifier} does not contain information pertaining to {prop_dict[prop]}, would you '
+                f'like to manually enter this information (y/n): ')
+        else:
+            print(
+                f'Mosaic does not contain information pertaining to {prop_dict[prop]}, would you '
+                f'like to manually enter this information (y/n): ')
+
+        x = input()
+        if x not in ['y', 'n', 'Y', 'N']:
+            print(
+                f'You have not provided acceptable input, please re-enter whether you would like'
+                f' to manually specify the {prop_dict[prop]} (y/n):')
+        if x in ['y', 'Y']:
+            print('Please specify the property, don\'t make any mistakes!')
+            x = input()
+            if prop == 'grid_size':
+                x = int(x)
+
+            setattr(self, prop, x)
+        else:
+            return
+
+    def read_mosaic_piece(self, indx):  # should probably think of a file naming convetion to match that outp
+        """
+
+        Parameters
+        ----------
+        indx
+
+        Returns
+        -------
+
+        """
+        file_name = ""
+        file_list = os.listdir(self.directory)
+        for x in file_list:
+            if x.split(sep='_', maxsplit=1)[0] == str(indx):
+                file_name = x
+
+        if file_name == "":
+            # split works from left to right
+            # print(f"unable to read in mosaic piece {indx}")
+            return 1
+
+        file_path = os.path.join(self.directory, file_name)
+
+        self.pieces[indx] = sitk.ReadImage(file_path)
+        if self.pieces[indx].GetSpacing() != self.spacing:
+            # print("re-wrote spacing due to mismatch")
+            self.pieces[indx].SetSpacing(self.spacing)
+            # print("re-wrote origin due to mismatch")
+            self.pieces[indx].SetOrigin(self.elements[indx])
+        return 0
+
+    def load_all_pieces(self):
+        for indx in self.elements.keys():
+            self.read_mosaic_piece(indx)
+
+    def unload_mosaic_piece(self, indx):
+        self.pieces.pop(indx)
+
+    def macro_histogram(self, nbins=10):
+        for indx in self.elements.keys():
+            if indx not in self.pieces.keys():
+                self.read_mosaic_piece(indx)
+            img_arr = sitk.GetArrayFromImage(self.pieces[indx])
+            if 'bins' not in locals():
+                counts, bins = np.histogram(img_arr.flatten(), bins=nbins, range = (0, 255))
+            else:
+                counts += np.histogram(img_arr.flatten(), bins=nbins, range = (0, 255))[0]
+            self.unload_mosaic_piece(indx)
+            print(f"\r{self.identifier}, piece {indx} processed in the mosaic wide histogram", ending='')
+        print('\n')
+        return counts, bins
+
+    def apply_function_over_mosaic(self, fcn_hndle, append_string='', output_dir = ""):
+
+        if output_dir == "":
+            output_dir = self.directory
+
+        if append_string == '':
+            append_string = str(fcn_hndle)
+
+        for indx in self.elements.keys():
+            if indx not in self.pieces.keys():
+                self.read_mosaic_piece(indx)
+
+            img_f = fcn_hndle(self.pieces[indx])
+            output_path = os.path.join(output_dir, self.identifier  + '-' + append_string)
+            if os.path.isdir(output_path):
+                output_file_path = os.path.join(output_path, str(indx) + '_' + append_string + '.nii')
+            else:
+                os.mkdir(output_path)
+                output_file_path = os.path.join(output_path, str(indx) + '_' + append_string + '.nii')
+            sitk.WriteImage(img_f, output_file_path)
+            self.unload_mosaic_piece(indx)
+            print(f'\r{self.identifier}, mosaic piece {indx} processed',end='')
+
+        self.write_mosaic_mapping_file(output_path, append_text=append_string)
+        print(f"\n{self.identifier} Mosaic processed succesfully")
+        return output_path
+
+    def apply_function_over_pieces(self, fcn_hndle, indices, append_string='', external_output=True):
+        if not external_output:
+            output = []
+        for indx in indices:
+            if indx not in self.pieces.keys():
+                self.read_mosaic_piece(indx)
+
+            img_f = fcn_hndle(self.pieces[indx])
+            # print(sitk.GetArrayViewFromImage(img_f).max())
+            if external_output:
+                output_path = os.path.join(self.directory, self.identifier + '_' + append_string)
+                if os.path.isdir(output_path):
+                    output_file_path = os.path.join(output_path, str(indx) + '_' + append_string + '.nii')
+                else:
+                    os.mkdir(output_path)
+                    output_file_path = os.path.join(output_path, str(indx) + '_' + append_string + '.nii')
+                sitk.WriteImage(img_f, output_file_path)
+            else:
+                output.append(img_f)
+            self.unload_mosaic_piece(indx)
+            # print(f'Mosaic piece {indx} processed using the "{fcn_hndle}" function')
+        if not external_output:
+            return output
+
+    def write_mosaic_mapping_file(self, directory, append_text=''):
+
+        output_file = os.path.join(directory, self.identifier + append_text + '_mosaic_mapping.txt')
+        with open(output_file, 'w') as f:
+            for indx in self.elements.keys():
+                f.write(f'{indx}, {self.elements[indx]}\n')
+            f.write(f'mosaic piece spacing, {self.spacing}\n')
+            f.write(f'total mosaic size, {self.macro_size}\n')
+            f.write(f'mosiac piece size, {self.piece_size}\n')
+            f.write(f'Grid size, {list(self.grid_size)}\n')
+            f.write(f'identifier, {self.identifier}\n')
+            f.write(f'original reconstruction location, {self.original_directory}\n')
+            f.write(f'downsampling factor, {self.downsample_factor}\n')
+
+    def visualise_piece(self, indx):
+        sitk.Show(self.pieces[indx])
+
+    # def mapping(self):
+    #     grid_map = sitk.Image([grid_size, grid_size, grid_size], sitk.sitkUInt16)
+
+    def create_adjacency_matrix(self):
+        """
+        Trying to remember the indexing from the creation of the initial mosaic
+        Returns
+        -------
+
+        """
+        self.adjacency_matrix = sitk.Image([self.grid_size[0], self.grid_size[1], self.grid_size[2]], sitk.sitkUInt16)
+        adjacency_spacing = [x * y for x, y in zip(self.spacing, self.piece_size)]
+        self.adjacency_matrix.SetSpacing(adjacency_spacing)
+        self.adjacency_matrix.SetOrigin([x/2.0 -1 for x in adjacency_spacing])
+
+        for i in range(0, self.grid_size[0]):
+            for j in range(0, self.grid_size[1]):
+                for k in range(0, self.grid_size[2]):
+                    lin_idx = i * self.grid_size[1] ** 1 + j * self.grid_size[1] ** 0 + k * (
+                            self.grid_size[0] * self.grid_size[1]) ** 1
+                    self.adjacency_matrix[i, j, k] = lin_idx
+
+    def location_of_point(self, point):
+        """
+        This function returns the mosaic priece that corresponds to a particular physical point in the total mosaic
+        """
+        indx = self.adjacency_matrix.TransformPhysicalPointToIndex(point)
+        return self.adjacency_matrix.GetPixel(indx)
+
+    def adjacent_pieces(self, piece_indx):
+        dilate_filter = sitk.BinaryDilateImageFilter()
+        dilate_filter.SetForegroundValue(piece_indx)
+        dilate_filter.SetKernelType(sitk.sitkBox)
+        # dilate_filter.SetKernelRadius(self.adjacency_matrix.GetSpacing())
+        dilate_filter.SetKernelRadius(1)
+        neighborhood = dilate_filter.Execute(self.adjacency_matrix)
+
+        neighborhood = (neighborhood != piece_indx) * (piece_indx + 1)
+        neighborhood = sitk.Mask(self.adjacency_matrix, neighborhood, maskingValue=piece_indx + 1,
+                                 outsideValue=self.grid_size[0] * self.grid_size[1] * self.grid_size[2])
+        pieces = []
+        for item in sitk.GetArrayFromImage(neighborhood).flatten():
+            if item != self.grid_size[0] * self.grid_size[1] * self.grid_size[2]:
+                pieces.append(item)
+        return pieces
+
+    def get_piece_indices_for_sub_region(self, region):
+        """
+
+        Parameters
+        ----------
+        region [x,y,z,x_length, y_length, z_length]
+
+        Returns
+        -------
+
+        """
+        # convert region into pixels -
+        x,y,z = self.adjacency_matrix.TransformPhysicalPointToIndex(region[:3])
+        x_size, y_size, z_size = np.ceil([x/z for x,z in zip(region[3:], self.adjacency_matrix.GetSpacing())]).astype(int)
+        pixel_region = [x,y,z, x_size, y_size, z_size]
+        centroid = self.adjacency_matrix.TransformIndexToPhysicalPoint((x,y,z))
+        for count, tup in enumerate(zip(region[:3], self.adjacency_matrix.GetSpacing(), centroid)):
+            loc = tup[0]
+            spacing = tup[1]
+            cen_loc = tup[2]
+            if loc>cen_loc:
+                pixel_region[count+3] += 1
+        # print(f"pixel_region: {pixel_region}")
+        sub_region = get_subregion(self.adjacency_matrix, pixel_region[:3], pixel_region[3:])
+        return sitk.GetArrayFromImage(sub_region).flatten()
+    def get_sub_region(self, region):
+        """
+        :param region: region defined in terms of spatial origin, and distance from origin
+        :return: a sub image from the greater mosaic structure with the origin and spatial size defined by the input region
+        """
+        sub_indices = self.get_piece_indices_for_sub_region(region)
+        print(len(sub_indices))
+        broad_region = self.create_mulitpiece_image(sub_indices)
+        # convert region to pixels??
+        origin = broad_region.TransformPhysicalPointToIndex(region[:3])
+        span = [x/y for x,y in zip(region[3:], broad_region.GetSpacing())]
+        span = np.ceil(span).astype(int)
+        print(span, origin)
+        sub_img = get_subregion(broad_region, origin, span)
+        return sub_img
+
+
+    def create_mulitpiece_image(self, indices):
+        n_indices = len(indices)
+        origs = np.zeros((n_indices, 3))
+        for count, index in enumerate(indices):
+            origs[count,:] = self.elements[index]
+        min_orig = origs.min(axis=0)
+        max_orig = origs.max(axis=0)
+        reg = list(min_orig) + [x+y-z for x,y,z in zip(max_orig, self.adjacency_matrix.GetSpacing(), min_orig)]
+
+        pixel_span = [int(x/z) for x,z in zip(reg[3:], self.spacing)]
+        for index in indices:
+            self.read_mosaic_piece(index)
+        multi_image = sitk.Image(pixel_span, self.pieces[index].GetPixelID())
+        multi_image.SetOrigin(min_orig)
+        multi_image.SetSpacing(self.spacing)
+        pasteFilter = sitk.PasteImageFilter()
+        pasteFilter.SetSourceSize(self.pieces[index].GetSize())
+        pasteFilter.SetSourceIndex([0, 0, 0])
+        for index in indices:
+            dest_indices = [int((x-y)/z) for x,z, y in zip(self.pieces[index].GetOrigin(), multi_image.GetSpacing(), multi_image.GetOrigin())]
+            pasteFilter.SetDestinationIndex(dest_indices)
+            multi_image = pasteFilter.Execute( multi_image, self.pieces[index])
+            self.unload_mosaic_piece(index)
+
+        return multi_image
+
+
+
+    def process_subregion(self, fcn_hndle, region, spatial=True, append_string=''):
+        if spatial:
+            # convert region into voxel coordinates
+            region = [float(region_param / resolution) for region_param, resolution in
+                      zip(region, self.adjacency_matrix.GetSpacing() + self.adjacency_matrix.GetSpacing())]
+
+        else:
+            # convert pixels into macro space
+            region = [float(region_param / size) for region_param, size in
+                      zip(region, self.piece_size + self.piece_size)]
+
+        # make sure that the subregion is contained within the selection of piece indices
+        for i in range(0, 3):
+            upshift = region[i] % 1
+            region[i] = int(np.floor(region[i]))
+            j = i + 3
+            region[j] = int(np.ceil(region[j] + upshift))
+
+        indices = self.get_piece_indices_for_sub_region(region)
+        self.apply_function_over_pieces(fcn_hndle, indices, append_string=append_string + '_subregion')
+        return indices
+
+    def linearIndex_to_matrixIndices(self, indx):
+        # slice_stack_number*grid_size**2 + i*grid_size**1 + j*grid_size**0
+
+        z_indx = indx // (self.grid_size[0] * self.grid_size[1])
+        indx = indx - indx // (self.grid_size[0] * self.grid_size[1]) * (self.grid_size[0] * self.grid_size[1])
+        x_indx = indx // self.grid_size[1] ** 1
+        indx = indx - indx // self.grid_size[1] ** 1 * self.grid_size[1] ** 1
+        y_indx = indx // self.grid_size[1] ** 0
+
+        return x_indx, y_indx, z_indx
+
+    def visualise_slice(self, indx, axis='z'):
+        """
+        Parameters
+        ----------
+        @indx - this indx is the whole reconstruction scale index
+        @axis - this parameter specifies the axis to which the plane being visualised is orthogonal to
+
+        Returns
+        -------
+        :param indx:
+        :param axis:
+
+        """
+        x_size, y_size, z_size = self.macro_size
+        if axis == 'z':
+            # test axis limits TO DO
+            piece_number = self.location_of_point((0, 0, indx * self.spacing[2]))
+            x_indx, y_indx, z_indx = self.linearIndex_to_matrixIndices(piece_number)
+            piece_list = sitk.GetArrayFromImage(self.adjacency_matrix[:, :, z_indx]).flatten()
+
+            mosaic_slice = sitk.Image([x_size, y_size], sitk.sitkUInt8)
+            mosaic_slice.SetOrigin((0, 0))
+            mosaic_slice.SetSpacing(self.spacing[:2])  # currently slice is purely 2D
+            z_indx_local = indx - z_indx * self.piece_size[2]
+            slice_size_local = self.piece_size[:2] + [0]  # the last zero signifies the collapse of the z axis
+            extract_filter = partial(sitk.Extract, size=slice_size_local, index=[0, 0, z_indx_local])
+            sub_imgs = self.apply_function_over_pieces(extract_filter, piece_list, external_output=False)
+            paste_filter = sitk.PasteImageFilter()
+            paste_filter.SetSourceIndex([0, 0])
+            paste_filter.SetSourceSize(slice_size_local[:2])
+            for img in sub_imgs:
+                origin = img.GetOrigin()
+                img_arr = sitk.GetArrayFromImage(img).flatten()
+                # print(img_arr.min() == img_arr.max(), img_arr.min(), img_arr.max())
+                destination = mosaic_slice.TransformPhysicalPointToIndex(origin)
+                paste_filter.SetDestinationIndex(destination)
+                mosaic_slice = paste_filter.Execute(mosaic_slice, img)
+        elif axis == 'x':
+
+            piece_number = self.location_of_point((indx * self.spacing[0], 0, 0))
+            x_indx, y_indx, z_indx = self.linearIndex_to_matrixIndices(piece_number)
+            piece_list = sitk.GetArrayFromImage(self.adjacency_matrix[x_indx - 1, :, :]).flatten()
+
+            mosaic_slice = sitk.Image([y_size, z_size], sitk.sitkUInt8)
+            mosaic_slice.SetOrigin((0, 0))
+            mosaic_slice.SetSpacing(self.spacing[1:])  # currently slice is purely 2D
+            x_indx_local = indx - 1 - (x_indx - 1) * self.piece_size[0]
+            slice_size_local = [0] + self.piece_size[1:]  # the initial zero signifies the collapse of the x-axis
+            extract_filter = partial(sitk.Extract, size=slice_size_local, index=[x_indx_local, 0, 0])
+            sub_imgs = self.apply_function_over_pieces(extract_filter, piece_list, external_output=False)
+            paste_filter = sitk.PasteImageFilter()
+            paste_filter.SetSourceIndex([0, 0])
+            paste_filter.SetSourceSize(slice_size_local[1:])
+            for img in sub_imgs:
+                origin = img.GetOrigin()
+                img_arr = sitk.GetArrayFromImage(img).flatten()
+                # print(img_arr.min() == img_arr.max(), img_arr.min(), img_arr.max())
+                destination = mosaic_slice.TransformPhysicalPointToIndex(origin)
+                paste_filter.SetDestinationIndex(destination)
+                mosaic_slice = paste_filter.Execute(mosaic_slice, img)
+        return mosaic_slice
+
+    def reconstruct_macro_image(self, do_resample=False, isotropic_resample_scale=0.0):
+        """
+        This function
+        Returns
+        -------
+
+        """
+        if do_resample and isotropic_resample_scale != 0:
+            resampled_spacing = np.array(self.spacing) * isotropic_resample_scale
+            resampled_mosaic_piece_size = [int(x / isotropic_resample_scale + 0.5) for x in self.piece_size]
+            resample = sitk.ResampleImageFilter()
+            resample.SetOutputDirection((1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0))  # Identity matrix
+            resample.SetOutputSpacing(resampled_spacing)
+            resample.SetInterpolator(sitk.sitkNearestNeighbor)
+            resample.SetSize(resampled_mosaic_piece_size)
+            resampled_img_size = [int(x / isotropic_resample_scale) for x in self.macro_size]
+            rss_x, rss_y, rss_z = resampled_img_size
+            macro_img = sitk.Image(resampled_img_size, sitk.sitkUInt8)
+            macro_img.SetSpacing(resampled_spacing)
+            z_stack = sitk.Image([rss_x, rss_y, self.macro_size[2]], sitk.sitkUInt8)
+            z_stack.SetSpacing([resampled_spacing[0], resampled_spacing[1], self.spacing[2]])
+
+        else:
+            macro_img = sitk.Image(self.macro_size, sitk.sitkUInt8)
+            macro_img.SetSpacing(self.spacing)
+        paste_filter = sitk.PasteImageFilter()
+        paste_filter.SetSourceIndex([0, 0, 0])
+
+        for indx in range(0, self.grid_size[0] * self.grid_size[1] * self.grid_size[2]):
+            err = 0
+            if indx not in self.pieces.keys():
+                err = self.read_mosaic_piece(indx)
+
+            print(f"\rread in image {indx}", end='')
+            if do_resample:
+
+                if indx % self.grid_size[1] == 0:
+                    # create temporary image in the y direction
+                    temp_y = sitk.Image([self.piece_size[0], self.macro_size[1], self.piece_size[2]],
+                                        sitk.sitkUInt8)
+                    temp_y.SetSpacing(self.spacing)
+                    temp_y.SetOrigin(self.elements[indx])
+                    if indx % (self.grid_size[0] * self.grid_size[1]) == 0:
+                        # create temp layer image
+                        temp_layer = sitk.Image([self.macro_size[0], rss_y, self.piece_size[2]], sitk.sitkUInt8)
+                        temp_layer.SetOrigin(self.elements[indx])
+                        temp_layer.SetSpacing([self.spacing[0], resampled_spacing[1], self.spacing[2]])
+                if err == 0:
+                    mosaic_piece = self.pieces[indx]
+                    origin = self.elements[indx]
+                    destination = temp_y.TransformPhysicalPointToIndex(origin)
+                    paste_filter.SetDestinationIndex(destination)
+
+                    resample.SetOutputOrigin(origin)
+                    paste_filter.SetSourceSize(self.piece_size)
+                    temp_y = paste_filter.Execute(temp_y, mosaic_piece)
+
+                if indx % self.grid_size[1] == self.grid_size[1] - 1:
+                    # temp_y is now fully stacked with images
+                    resample.SetSize([temp_y.GetSize()[0], rss_y, temp_y.GetSize()[2]])
+                    resample.SetOutputSpacing(temp_layer.GetSpacing())
+                    resample.SetOutputOrigin(temp_y.GetOrigin())
+                    resampled_y_stack = resample.Execute(temp_y)
+
+                    # paste resampled stack into temporary layer image
+                    destination = temp_layer.TransformPhysicalPointToIndex(temp_y.GetOrigin())
+                    paste_filter.SetSourceSize(resampled_y_stack.GetSize())
+                    paste_filter.SetDestinationIndex(destination)
+                    temp_layer = paste_filter.Execute(temp_layer, resampled_y_stack)
+
+                if indx % (self.grid_size[0] * self.grid_size[1]) == (self.grid_size[0] * self.grid_size[1]) - 1:
+                    # oooh yay we have a complete layer
+                    resample.SetSize([rss_x, rss_y, self.macro_size[2]])
+                    resample.SetOutputSpacing(z_stack.GetSpacing())
+                    resample.SetOutputOrigin(temp_layer.GetOrigin())
+                    resampled_layer = resample.Execute(temp_layer)
+
+                    destination = z_stack.TransformPhysicalPointToIndex(temp_layer.GetOrigin())
+                    paste_filter.SetSourceSize(resampled_layer.GetSize())
+                    paste_filter.SetDestinationIndex(destination)
+                    z_stack = paste_filter.Execute(z_stack, resampled_layer)
+            else:
+                origin = self.elements[indx]
+                destination = macro_img.TransformPhysicalPointToIndex(origin)
+                paste_filter.SetDestinationIndex(destination)
+                paste_filter.SetSourceSize(self.pieces[indx].GetSize())
+                macro_img = paste_filter.Execute(macro_img, self.pieces[indx])
+            if err == 0:
+                self.unload_mosaic_piece(indx)
+        # print(f"Mosaic piece {indx} successfully processed")
+        print("\n")
+        if do_resample:
+            resample.SetSize([rss_x, rss_y, rss_z])
+            resample.SetOutputSpacing(resampled_spacing)
+            resample.SetOutputOrigin(z_stack.GetOrigin())
+            resampled_img = resample.Execute(z_stack)
+
+            print("And here we are once again")
+
+        return resampled_img
+
+    def remove_blank_pieces(self, upperLimit=0.0):
+
+        for indx in self.elements.keys():
+
+            err = self.read_mosaic_piece(indx)
+            if err == 0:
+                flat_im = sitk.GetArrayViewFromImage(self.pieces[indx])
+                max_val = flat_im.max()
+                if max_val < upperLimit:
+                    self.remove_mosaic_piece(indx)
+                self.unload_mosaic_piece(indx)
+            else:
+                pass
+        return
+
+    def remove_mosaic_piece(self, indx):
+        file_list = os.listdir(self.directory)
+        file_name = ""
+        for x in file_list:
+            if x.split(sep='_', maxsplit=1)[0] == str(indx):
+                file_name = x
+                break
+        if file_name != "":
+            os.remove(os.path.join(self.directory, file_name))
+            return 0
+        else:
+            return
