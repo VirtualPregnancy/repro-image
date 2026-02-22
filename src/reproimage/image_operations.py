@@ -404,7 +404,6 @@ def get_subregion(img: sitk.Image, origin, size):
     return ex_filter.Execute(img)
 
 """This code outlines the mosaic class for working with discretised large medical images"""
-from toby_utils import get_subregion
 class mosaic:
     def __init__(self, directory):
         # TO DO check directory validity
