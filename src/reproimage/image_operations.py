@@ -4,7 +4,7 @@ from scipy.stats import variation
 import numpy as np
 import re, os, sys
 from math import ceil
-
+from functools import partial
 def efficient_largest_ccmp_filter(image: sitk.Image):
     """
     :param image: with a single label
@@ -376,12 +376,34 @@ def downsample(reconstruction_directory, output_directory, sample_identifier, is
     return image_stack_to_volume(reconstruction_directory, output_directory, sample_identifier, isotropic_downsample_dim,
                            grid_size=[1, 1, 1])
 
+def get_subregion(img: sitk.Image, origin, size):
+    """ This takes in a roi using voxel coordinates, not imagespace, it needs some error catching for regions of interest
+    that are beyond the bounds of an image"""
+
+    origin = np.array([x for x in origin])
+    for count, index in enumerate(origin):
+        if index<0:
+            origin[count] = 0
+
+    pt = origin.astype(np.uint16)
+    if type(size) == int:
+        reg = pt.tolist() + [int(size)]*3
+    else:
+        reg = pt.tolist() + [int(x) for x in size]
+
+    count = 0
+    for start,span, limit in zip(reg[:3],reg[3:], img.GetSize()):
+        if start+span > limit:
+            new_span = limit-start - 1
+            reg[3+count] = int(new_span)
+        count += 1
+    reg = tuple(reg)
+    ex_filter = sitk.ExtractImageFilter()
+    ex_filter.SetIndex(reg[:3])
+    ex_filter.SetSize(reg[3:])
+    return ex_filter.Execute(img)
+
 """This code outlines the mosaic class for working with discretised large medical images"""
-import os
-# noinspection SpellCheckingInspection
-import SimpleITK as sitk
-import numpy as np
-from functools import partial
 from toby_utils import get_subregion
 class mosaic:
     def __init__(self, directory):
