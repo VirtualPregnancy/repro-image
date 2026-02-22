@@ -916,6 +916,9 @@ class mosaic:
                         temp_layer.SetSpacing([self.spacing[0], resampled_spacing[1], self.spacing[2]])
                 if err == 0:
                     mosaic_piece = self.pieces[indx]
+                    if mosaic_piece.GetPixelID() != sitk.sitkUInt8:
+                        mosaic_piece = sitk.Cast(mosaic_piece, sitk.sitkUInt8)
+                        
                     origin = self.elements[indx]
                     destination = temp_y.TransformPhysicalPointToIndex(origin)
                     paste_filter.SetDestinationIndex(destination)
