@@ -60,3 +60,27 @@ def visualise_graph(graph: nx.graph, coords: np.array, radius: float = 1.0):
     pod_tube = pod.tube(radius=radius)
     plotter.add_mesh(pod_tube, render_lines_as_tubes=True)
     plotter.show()
+
+def visualise_segmentation(seg: np.array, opacity_setting = 0.5):
+    """
+
+    Parameters
+    ----------
+    segA - 3D numpy array
+
+    Returns
+    visualisation of the surfaces of the single label classification in both input images, the segmentation for input 1 is opaque, while the
+    segmentation for input 2 is partiall opqaque (transparent)
+    """
+
+    if seg.max() == 0:
+        print("Warning: cannot visualise an array of zeroes, if you ran this with an arrayview then you have just "
+              "made a CLASSIC error ")
+    else:
+        verts, faces, normals, values = sk.measure.marching_cubes(segA, 0)
+        # PyVista expects face arrays prefixed with the vertex count: [3, v0, v1, v2, ...]
+        pv_faces = np.hstack([np.full((len(faces), 1), 3), faces]).ravel()
+        pl = pv.Plotter(window_size=(800, 700))
+        mesh = pv.PolyData(verts, pv_faces)
+        pl.add_mesh(mesh)
+        pl.show()
