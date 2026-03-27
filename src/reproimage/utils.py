@@ -2,7 +2,7 @@ import inspect
 
 import numpy as np
 from pathlib import Path
-from scipy.signal import find_peaks
+from scipy.signal import find_peaks, savgol_filter
 from scipy.interpolate import interp1d
 from matplotlib import pyplot as plt
 import sqlite3
@@ -187,6 +187,277 @@ def mean_wave(x_values, y_values, verbose=False):
         plt.show()
 
     return new_average_wave, x_common
+
+
+def _plot_detection_diagnostics(
+    x_values,
+    y_values,
+    peak_indices,
+    foot_indices,
+    ps_indices,
+    ed_indices,
+    search_windows,
+    debug_rows,
+    smooth_window_max,
+    polyorder,
+):
+    """
+    Plot diagnostic panels for beat-foot detection and derivative-based anchors.
+
+    :param x_values: 1D numpy array of x-axis values for the waveform.
+    :param y_values: 1D numpy array of waveform amplitudes.
+    :param peak_indices: 1D integer array of anchor peak indices.
+    :param foot_indices: 1D integer array of detected foot indices.
+    :param ps_indices: List/array of peak systolic (PS) indices per beat.
+    :param ed_indices: List/array of end-diastolic (ED) indices per beat.
+    :param search_windows: List of (start, end) index tuples used as foot search regions.
+    :param debug_rows: List of dictionaries containing per-beat debug values
+    (search bounds, selected indices, and slope thresholds).
+    :param smooth_window_max: Integer max odd window size used for Savitzky-Golay smoothing.
+    :param polyorder: Polynomial order for Savitzky-Golay smoothing.
+    :return: None. Shows matplotlib figures for interactive diagnostics.
+    """
+    fig, (ax1, ax2, ax3) = plt.subplots(
+        3,
+        1,
+        figsize=(11, 10),
+        sharex=True,
+        gridspec_kw={"height_ratios": [2, 1, 1]},
+    )
+
+    y_smooth_global = y_values.copy()
+    if len(y_values) >= 5:
+        win_g = min(smooth_window_max, len(y_values))
+        if win_g % 2 == 0:
+            win_g -= 1
+        if win_g >= 5:
+            y_smooth_global = savgol_filter(
+                y_values, window_length=win_g, polyorder=polyorder
+            )
+
+    ax1.plot(x_values, y_values, label="Waveform", color="blue")
+    ax1.plot(
+        x_values,
+        y_smooth_global,
+        label="Smoothed (for derivatives)",
+        color="C1",
+        linewidth=1.2,
+        alpha=0.9,
+    )
+    ax1.scatter(
+        x_values[peak_indices],
+        y_values[peak_indices],
+        color="black",
+        label="Peaks",
+        zorder=5,
+    )
+    ax1.scatter(
+        x_values[foot_indices],
+        y_values[foot_indices],
+        color="red",
+        label="Detected feet",
+        zorder=6,
+    )
+    if len(ps_indices) > 0:
+        ax1.scatter(
+            x_values[np.asarray(ps_indices, dtype=int)],
+            y_values[np.asarray(ps_indices, dtype=int)],
+            color="C2",
+            s=26,
+            marker="^",
+            label="PS (foot-beat)",
+            zorder=7,
+        )
+    if len(ed_indices) > 0:
+        ax1.scatter(
+            x_values[np.asarray(ed_indices, dtype=int)],
+            y_values[np.asarray(ed_indices, dtype=int)],
+            color="C3",
+            s=26,
+            marker="v",
+            label="ED (foot-beat)",
+            zorder=7,
+        )
+    for k, (s, e) in enumerate(search_windows):
+        ax1.axvspan(
+            x_values[s],
+            x_values[e - 1],
+            color="orange",
+            alpha=0.12,
+            label="Search window" if k == 0 else None,
+        )
+    if foot_indices.size > 0:
+        fp = np.asarray(foot_indices, dtype=int)
+        fp = fp[(fp >= 0) & (fp < len(x_values))]
+        if fp.size > 0:
+            if int(fp[0]) > 0:
+                ax1.axvspan(
+                    x_values[0],
+                    x_values[int(fp[0])],
+                    color="#ff6b6b",
+                    alpha=0.08,
+                    zorder=0,
+                    label="Incomplete region",
+                )
+            ap = np.asarray(peak_indices, dtype=int)
+            ap = ap[(ap >= 0) & (ap < len(x_values))]
+            if ap.size > 0 and int(ap[-1]) > int(fp[-1]):
+                ax1.axvspan(
+                    x_values[int(fp[-1])],
+                    x_values[-1],
+                    color="#ff6b6b",
+                    alpha=0.08,
+                    zorder=0,
+                    label=None,
+                )
+    ax1.set_title("Waveform with anchor peaks, feet, PS and ED")
+    ax1.set_ylabel("Amplitude")
+    ax1.legend()
+    ax1.grid(True)
+
+    dy_g = np.gradient(y_smooth_global, x_values)
+    d2y_g = np.gradient(dy_g, x_values)
+    ax2.axhline(0.0, color="0.7", linewidth=1)
+    ax2.plot(
+        x_values,
+        dy_g,
+        linestyle="-",
+        linewidth=1.2,
+        label="First derivative (dy/dx) of smoothed signal",
+    )
+    for k, (s, e) in enumerate(search_windows):
+        ax2.axvspan(
+            x_values[s],
+            x_values[e - 1],
+            color="orange",
+            alpha=0.12,
+            label="Search window" if k == 0 else None,
+        )
+
+    for k, row in enumerate(debug_rows):
+        s = int(row["search_start"])
+        e = int(row["search_end"])
+        ub = int(row["foot2_global"])
+        picked = int(row["picked_global"])
+        slope_thr = float(row["slope_thr"]) if np.isfinite(row["slope_thr"]) else np.nan
+        if s < 0 or e <= s or e > len(x_values):
+            continue
+        if np.isfinite(slope_thr):
+            ax2.plot(
+                [x_values[s], x_values[e - 1]],
+                [slope_thr, slope_thr],
+                ":",
+                color="gray",
+                alpha=0.7,
+                label="dy threshold" if k == 0 else None,
+            )
+        if 0 <= ub < len(x_values):
+            ax2.scatter(
+                [x_values[ub]],
+                [dy_g[ub]],
+                marker="s",
+                facecolors="none",
+                edgecolors="black",
+                s=24,
+                label="Second-derivative anchor" if k == 0 else None,
+                zorder=6,
+            )
+        if 0 <= picked < len(x_values):
+            ax2.scatter(
+                [x_values[picked]],
+                [dy_g[picked]],
+                marker="D",
+                color="red",
+                s=22,
+                label="Selected foot (low-slope onset)" if k == 0 else None,
+                zorder=7,
+            )
+
+    ax2.set_title("First derivative with second-derivative anchors and selected feet")
+    ax2.set_ylabel("First derivative (dy/dx)")
+    ax2.legend()
+    ax2.grid(True)
+
+    ax3.axhline(0.0, color="0.7", linewidth=1)
+    ax3.plot(
+        x_values,
+        d2y_g,
+        linestyle="-",
+        linewidth=1.2,
+        label="Second derivative (d²y/dx²) of smoothed signal",
+    )
+    for k, (s, e) in enumerate(search_windows):
+        ax3.axvspan(
+            x_values[s],
+            x_values[e - 1],
+            color="orange",
+            alpha=0.12,
+            label="Search window" if k == 0 else None,
+        )
+
+    for k, row in enumerate(debug_rows):
+        ub = int(row["foot2_global"])
+        if 0 <= ub < len(x_values):
+            ax3.scatter(
+                [x_values[ub]],
+                [d2y_g[ub]],
+                marker="s",
+                facecolors="none",
+                edgecolors="black",
+                s=24,
+                label="Second-derivative anchor" if k == 0 else None,
+                zorder=6,
+            )
+
+    ax3.set_title("Second derivative with anchor points")
+    ax3.set_xlabel("Time")
+    ax3.set_ylabel("Second derivative (d²y/dx²)")
+    ax3.legend()
+    ax3.grid(True)
+
+    fig.tight_layout()
+    plt.show()
+
+
+def _plot_wave_set(x_common, interpolated_waves, average_wave, std_wave):
+    """
+    Plot aligned beat waveforms with their mean and +/- 1 standard deviation.
+
+    :param x_common: 1D numpy array of common x-axis points used after interpolation.
+    :param interpolated_waves: Iterable of 1D arrays representing aligned beat waveforms.
+    :param average_wave: 1D numpy array containing the pointwise mean waveform.
+    :param std_wave: 1D numpy array containing the pointwise waveform standard deviation.
+    :return: None. Shows a matplotlib figure.
+    """
+    plt.figure(figsize=(10, 6))
+    plt.title("Set of Waveforms")
+    plt.xlabel("Time")
+    plt.ylabel("Amplitude")
+    for wave_index, waveform in enumerate(interpolated_waves):
+        plt.plot(x_common, waveform, label=f"Waveform {wave_index}")
+    plt.plot(x_common, average_wave, label='Average wave', linestyle='-.')
+    plt.plot(x_common, average_wave + std_wave, label='Average wave + SD', linestyle='--')
+    plt.plot(x_common, average_wave - std_wave, label='Average wave - SD', linestyle='--')
+    plt.legend()
+    plt.grid(True)
+    plt.show()
+
+
+def _plot_average_wave(x_common, new_average_wave):
+    """
+    Plot the final averaged waveform after outlier-beat filtering.
+
+    :param x_common: 1D numpy array of common x-axis points.
+    :param new_average_wave: 1D numpy array of final averaged waveform values.
+    :return: None. Shows a matplotlib figure.
+    """
+    plt.figure(figsize=(10, 6))
+    plt.title("Average waveform")
+    plt.xlabel("Time")
+    plt.ylabel("Amplitude")
+    plt.plot(x_common, new_average_wave)
+    plt.grid(True)
+    plt.show()
 
 
 class MetaData:
