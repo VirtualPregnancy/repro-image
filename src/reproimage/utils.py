@@ -71,49 +71,252 @@ def confirm_directory(directory: Path):
 
 def mean_wave(x_values, y_values, verbose=False):
     """
-    :param x_values: numpy array of x values
-    :param y_values: numpy array of y values
-    :param verbose: boolean, controls the verbosity of the function
-    :return: a tuple in the form (average wave y values, averaged wave x values)
+    Compute an average beat waveform from a contiguous Doppler waveform.
+
+    Method summary (aligned with current usseg beat logic):
+    1) Propose systolic anchor peaks with prominence-based peak finding and
+       merge peaks that are too close.
+    2) For each anchor peak, build a backward search window in the preceding
+       part of the beat.
+    3) In that window:
+       - smooth the signal,
+       - compute first derivative (slope) and second derivative (change in slope),
+       - find a second-derivative anchor (strongest upslope acceleration),
+       - walk backward on first derivative to the onset of low slope (foot onset).
+    4) Build beats foot-to-foot and derive PS/ED points within each beat for
+       diagnostics.
+    5) Segment foot-to-foot, align beats to a common x-axis, average, remove
+       outlier beats, and recompute the final mean wave.
+
+    :param x_values: numpy array of x values (typically time/sample position).
+    :param y_values: numpy array of y values (waveform amplitude/velocity envelope).
+    :param verbose: boolean controlling diagnostic plotting output.
+    :return: a tuple in the form (average wave y values, averaged wave x values).
     """
+    ### 1) Propose anchor peaks, then merge peaks that are too close.
     wave_amplitude = y_values.max()-y_values.min()
 
-    all_trough_indices, _ = find_peaks(-1*y_values)  # Negate y_values to find minima
-    peak_indices, _ = find_peaks(y_values, prominence=wave_amplitude / 4)  # Negate y_values to find minima
-    ## Want to find the last local minima that has occured before a main peak
-    trough_indices = []
-    for peak in peak_indices:
-        trough_loc = np.where(all_trough_indices<peak)[0].tolist()
-        if trough_loc:
-            trough_loc = trough_loc[-1]
-            trough_indices.append(all_trough_indices[trough_loc])
+    peak_indices, _ = find_peaks(y_values, prominence=wave_amplitude / 4)
+    # Min separation (assume x is time): 200 bpm -> 0.3 s; merge peaks closer than that, keep highest
+    if len(peak_indices) > 1 and len(x_values) >= 2:
+        dx = float(np.median(np.diff(x_values)))
+        if np.isfinite(dx) and dx > 0:
+            min_distance = max(1, int(60.0 / 200.0 / dx))
+            order = np.argsort(peak_indices)
+            peaks = peak_indices[order]
+            consolidated = []
+            i = 0
+            while i < len(peaks):
+                j = i
+                best = int(peaks[i])
+                while j + 1 < len(peaks) and (int(peaks[j + 1]) - int(peaks[j])) <= min_distance:
+                    j += 1
+                    cand = int(peaks[j])
+                    if y_values[cand] > y_values[best]:
+                        best = cand
+                consolidated.append(best)
+                i = j + 1
+            peak_indices = np.array(consolidated, dtype=int)
+    ### 2) For each anchor peak, build a backward search window.
+    ### 3) In each window, detect foot onset via derivative logic.
+    # second-derivative anchor -> backward first-derivative onset threshold.
+    foot_indices = []
+    search_windows = []
+    debug_rows = []
 
+    search_fraction = 0.50
+    smooth_window_max = 11
+    polyorder = 2
+    min_samples_before_peak = 3
+    foot_max_rel_height = 0.55
 
+    for i in range(0, len(peak_indices)):
+        peak = int(peak_indices[i])
+        if i == 0:
+            if len(peak_indices) >= 3:
+                diffs = np.diff(peak_indices).astype(float)
+                other = diffs[1:] if len(diffs) >= 2 else diffs
+                interval_est = int(np.round(np.mean(other))) if other.size > 0 else 0
+            elif len(peak_indices) >= 2:
+                interval_est = int(peak_indices[1] - peak_indices[0])
+            else:
+                interval_est = 0
+            if interval_est < 5:
+                continue
+            interval = int(interval_est)
+            prev_peak = max(0, peak - interval)
+        else:
+            prev_peak = int(peak_indices[i - 1])
+            interval = int(peak - prev_peak)
+        if interval < 5:
+            continue
+
+        local_search_fraction = float(search_fraction) if i == 0 else max(0.0, float(search_fraction) - 0.10)
+        search_len = max(3, int(local_search_fraction * interval))
+        # If first-wave search would extend before signal start, skip this beat.
+        if i == 0 and (peak - search_len) < 0:
+            continue
+        search_start = max(prev_peak, peak - search_len)
+        search_end = max(search_start + 2, peak - int(max(1, min_samples_before_peak)))
+        if search_end <= search_start + 2:
+            continue
+
+        x_region_raw = np.asarray(x_values[search_start:search_end], dtype=float)
+        y_region = y_values[search_start:search_end]
+        if len(y_region) < 3 or x_region_raw.size != len(y_region):
+            continue
+
+        ### 3a) Smooth the local region before derivative calculations.
+        y_smooth = y_region.copy()
+        if len(y_region) >= 5:
+            win = min(smooth_window_max, len(y_region))
+            if win % 2 == 0:
+                win -= 1
+            if win >= 5:
+                y_smooth = savgol_filter(y_region, window_length=win, polyorder=polyorder)
+
+        try:
+            if np.all(np.isfinite(x_region_raw)) and (x_region_raw[-1] > x_region_raw[0]):
+                x_region = np.linspace(float(x_region_raw[0]), float(x_region_raw[-1]), int(len(x_region_raw)))
+                y_for_deriv = np.interp(x_region, x_region_raw, y_smooth)
+            else:
+                x_region = np.arange(search_end - search_start, dtype=float)
+                y_for_deriv = y_smooth
+        except Exception:
+            x_region = np.arange(search_end - search_start, dtype=float)
+            y_for_deriv = y_smooth
+
+        ### 3b) Compute first/second derivatives and smooth d2y.
+        dy = np.gradient(y_for_deriv, x_region)
+        d2y_raw = np.gradient(dy, x_region)
+        d2y = d2y_raw.copy()
+        if len(y_region) >= 5:
+            win_d = min(smooth_window_max, len(y_region))
+            if win_d % 2 == 0:
+                win_d -= 1
+            if win_d >= 5:
+                d2y = savgol_filter(d2y_raw, window_length=win_d, polyorder=polyorder)
+
+        ### 3c) Find second-derivative anchor (maximum upslope acceleration).
+        edge_guard = int(max(0, min(2, (len(d2y) - 1) // 2)))
+        if len(d2y) - (2 * edge_guard) >= 3:
+            d2_core = d2y[edge_guard: len(d2y) - edge_guard]
+            foot2_local = int(edge_guard + np.argmax(d2_core))
+        else:
+            foot2_local = int(np.argmax(d2y))
+
+        ### 3d) Walk backward on dy to find low-slope foot onset.
+        dy_seg = dy[: foot2_local + 1]
+        if dy_seg.size == 0:
+            continue
+        dy_max = float(np.max(dy_seg))
+        picked_local = int(foot2_local)
+        slope_thr = np.nan
+        if np.isfinite(dy_max) and dy_max > 0:
+            slope_thr = 0.08 * dy_max
+            for j in range(int(foot2_local), -1, -1):
+                if float(dy[j]) <= float(slope_thr):
+                    picked_local = int(j)
+                    break
+        picked = int(search_start + picked_local)
+
+        ### 3e) Apply morphology guardrails and fallback if needed.
+        try:
+            trough_y = float(np.min(y_values[prev_peak:peak])) if peak > prev_peak + 1 else float(y_values[prev_peak])
+            peak_y = float(y_values[peak])
+        except Exception:
+            trough_y = float(np.min(y_region))
+            peak_y = float(np.max(y_region))
+        allowed_y = trough_y + float(foot_max_rel_height) * (peak_y - trough_y)
+        needs_fallback = (
+            picked < 0
+            or picked >= len(y_values)
+            or picked >= peak - int(max(1, min_samples_before_peak))
+            or float(y_values[picked]) > allowed_y
+        )
+        if needs_fallback:
+            seg_pre = y_values[search_start: search_start + foot2_local + 1]
+            if seg_pre.size > 0:
+                picked = int(search_start + int(np.argmin(seg_pre)))
+            else:
+                picked = int(search_start + foot2_local)
+
+        foot_indices.append(picked)
+        search_windows.append((search_start, search_end))
+        debug_rows.append(
+            {
+                "search_start": int(search_start),
+                "search_end": int(search_end),
+                "foot2_global": int(search_start + foot2_local),
+                "picked_global": int(picked),
+                "dy": np.asarray(dy, dtype=float),
+                "d2y": np.asarray(d2y, dtype=float),
+                "slope_thr": float(slope_thr) if np.isfinite(slope_thr) else np.nan,
+            }
+        )
+
+    foot_indices = np.asarray(foot_indices, dtype=int)
+    if len(foot_indices) < 2:
+        raise ValueError("Not enough foot points found to calculate mean wave.")
+    ### 4) Build foot-to-foot beats and derive PS/ED points.
+    y_s = np.asarray(y_values, dtype=float)
+    if len(y_values) >= 5:
+        y_s = np.convolve(y_values, np.ones(5) / 5.0, mode="same")
+    ps_indices = []
+    ed_indices = []
+    for i in range(len(foot_indices) - 1):
+        a = int(foot_indices[i])
+        b = int(foot_indices[i + 1])
+        if b <= a + 2:
+            continue
+        seg = y_s[a:b]
+        anchor_in_beat = peak_indices[(peak_indices >= a) & (peak_indices < b)]
+        ps_idx = None
+        if anchor_in_beat.size > 0:
+            aa = anchor_in_beat[np.argmax(y_s[anchor_in_beat])]
+            ps_idx = int(aa)
+            ps_indices.append(ps_idx)
+        else:
+            ps_idx = int(a + int(np.argmax(seg)))
+            ps_indices.append(ps_idx)
+
+        # ED is constrained to occur after PS within the same beat.
+        ed_start = int(max(a, ps_idx + 1))
+        if ed_start < b:
+            seg_ed = y_s[ed_start:b]
+            if seg_ed.size > 0:
+                ed_indices.append(int(ed_start + int(np.argmin(seg_ed))))
+                continue
+        # Fallback for very short post-PS segments.
+        ed_indices.append(int(a + int(np.argmin(seg))))
+    segment_indices = foot_indices
+
+    ### 5) Segment, align, average, filter outliers, and recompute mean wave.
     interpolated_waves = []
     if verbose:
-        plt.figure(figsize=(10, 6))
-        plt.plot(x_values, y_values, label="Waveform", color='blue')
-        plt.scatter(x_values[all_trough_indices], y_values[all_trough_indices], color='blue', label='Troughs', zorder=5)
-        plt.scatter(x_values[peak_indices], y_values[peak_indices], color='black', label='Peaks', zorder=5)
-        plt.scatter(x_values[trough_indices], y_values[trough_indices], color='red', label='Final Troughs', zorder=5)
+        _plot_detection_diagnostics(
+            x_values=x_values,
+            y_values=y_values,
+            peak_indices=peak_indices,
+            foot_indices=foot_indices,
+            ps_indices=ps_indices,
+            ed_indices=ed_indices,
+            search_windows=search_windows,
+            debug_rows=debug_rows,
+            smooth_window_max=smooth_window_max,
+            polyorder=polyorder,
+        )
 
-        plt.title("Waveform with Trough Points")
-        plt.xlabel("Time")
-        plt.ylabel("Amplitude")
-        plt.legend()
-        plt.grid(True)
-        plt.show()
-
-    for i in range(len(trough_indices) - 1):
+    for i in range(len(segment_indices) - 1):
         # Extract data for the current segment
-        start_index = trough_indices[i]
-        end_index = trough_indices[i + 1]
+        start_index = segment_indices[i]
+        end_index = segment_indices[i + 1]
         x_segment = x_values[start_index:end_index]
         y_segment = y_values[start_index:end_index]
 
         # Shift x-coordinates for alignment (except the first wave)
         if i > 0:
-            x_segment = x_segment - (x_segment[0] - x_values[trough_indices[0]])
+            x_segment = x_segment - (x_segment[0] - x_values[segment_indices[0]])
 
         # Initialize the common x-axis using the first segment
         if i == 0:
@@ -135,18 +338,7 @@ def mean_wave(x_values, y_values, verbose=False):
     amplitude_of_ave = np.max(average_wave)-np.min(average_wave)
 
     if verbose:
-        plt.figure(figsize=(10, 6))
-        plt.title("Set of Waveforms")
-        plt.xlabel("Time")
-        plt.ylabel("Amplitude")
-        for wave_index, waveform in enumerate(interpolated_waves):
-            plt.plot(x_common, waveform, label=f"Waveform {wave_index}")
-        plt.plot(x_common, average_wave, label='Average wave', linestyle='-.')
-        plt.plot(x_common, average_wave+std_wave, label='Average wave + SD', linestyle='--')
-        plt.plot(x_common, average_wave-std_wave, label='Average wave - SD', linestyle='--')
-        plt.legend()
-        plt.grid(True)
-        plt.show()
+        _plot_wave_set(x_common, interpolated_waves, average_wave, std_wave)
 
     # Filter out waves outside the range of average ± standard deviation
     threshold_percentage = 80
@@ -163,7 +355,7 @@ def mean_wave(x_values, y_values, verbose=False):
         if percentage_within_range >= threshold_percentage:
             filtered_waves.append(wave)
         else:
-            count_excluded =+ 1
+            count_excluded += 1
             excluded_waves.append(wave)
     if verbose:
         print("Waves filtered, num excluded", count_excluded)
@@ -177,14 +369,7 @@ def mean_wave(x_values, y_values, verbose=False):
     new_average_wave = np.mean(filtered_waves_np, axis=0)
     new_std_wave = np.std(filtered_waves_np, axis=0)
     if verbose:
-        plt.figure(figsize=(10, 6))
-        plt.title("Average waveform")
-        plt.xlabel("Time")
-        plt.ylabel("Amplitude")
-        plt.plot(x_common, new_average_wave)
-        #plt.plot(x_common, excluded_waves[0])
-        plt.grid(True)
-        plt.show()
+        _plot_average_wave(x_common, new_average_wave)
 
     return new_average_wave, x_common
 
