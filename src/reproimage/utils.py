@@ -331,6 +331,7 @@ def mean_wave(x_values, y_values, verbose=False):
 
     # Convert the list of interpolated waves to a NumPy array for calculations
     interpolated_waves_np = np.vstack(interpolated_waves)
+    total_beats = interpolated_waves_np.shape[0]
 
     # Calculate the initial average and standard deviation
     average_wave = np.mean(interpolated_waves_np, axis=0)
@@ -371,7 +372,16 @@ def mean_wave(x_values, y_values, verbose=False):
     if verbose:
         _plot_average_wave(x_common, new_average_wave)
 
-    return new_average_wave, x_common
+    num_filtered_waves = filtered_waves_np.shape[0]
+    num_excluded_waves = len(excluded_waves)
+
+    diagnostics = {
+        "total_beats": total_beats,
+        "num_beats_retained": num_filtered_waves,
+        "num_beats_excluded": num_excluded_waves
+    }
+
+    return new_average_wave, x_common, diagnostics
 
 
 def _plot_detection_diagnostics(
