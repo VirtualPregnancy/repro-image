@@ -71,7 +71,7 @@ def confirm_directory(directory: Path):
         print(f"{directory} did not exist, it has been created")
     return
 
-def mean_wave(x_values, y_values, verbose=False):
+def mean_wave(x_values, y_values, verbose=False, return_valid_beats=False):
     """
     Compute an average beat waveform from a contiguous Doppler waveform.
 
@@ -93,9 +93,9 @@ def mean_wave(x_values, y_values, verbose=False):
     :param x_values: numpy array of x values (typically time/sample position).
     :param y_values: numpy array of y values (waveform amplitude/velocity envelope).
     :param verbose: boolean controlling diagnostic plotting output.
-    :return: (mean_y, x_common, valid_beats, diagnostics). mean_y and x_common are
-        the averaged waveform; valid_beats has shape (n_retained, len(x_common))
-        with each retained beat aligned on x_common; diagnostics has beat counts.
+    :param return_valid_beats: if False (default), return (mean_y, x_common) only.
+        If True, also return valid_beats and diagnostics for per-beat analysis.
+    :return: (mean_y, x_common) or (mean_y, x_common, valid_beats, diagnostics).
     """
     ### 1) Propose anchor peaks, then merge peaks that are too close.
     wave_amplitude = y_values.max()-y_values.min()
@@ -390,7 +390,9 @@ def mean_wave(x_values, y_values, verbose=False):
         "num_beats_excluded": num_excluded_waves,
     }
 
-    return new_average_wave, x_common, valid_beats, diagnostics
+    if return_valid_beats:
+        return new_average_wave, x_common, valid_beats, diagnostics
+    return new_average_wave, x_common
 
 
 def _beat_ps_ed_mean(beat, late_diastolic_frac=0.6):
