@@ -93,7 +93,10 @@ def mean_wave(x_values, y_values, verbose=False):
     :param x_values: numpy array of x values (typically time/sample position).
     :param y_values: numpy array of y values (waveform amplitude/velocity envelope).
     :param verbose: boolean controlling diagnostic plotting output.
-    :return: a tuple in the form (average wave y values, averaged wave x values).
+    :return: tuple (mean_y, x_common, valid_beats, diagnostics) where mean_y and
+        x_common are the averaged beat waveform; valid_beats is a 2D array of
+        shape (n_retained, len(x_common)) containing each quality-filtered beat
+        aligned and interpolated onto x_common; diagnostics holds beat counts.
     """
     ### 1) Propose anchor peaks, then merge peaks that are too close.
     wave_amplitude = y_values.max()-y_values.min()
@@ -368,22 +371,27 @@ def mean_wave(x_values, y_values, verbose=False):
               f"using a cutoff proportion of {threshold_percentage} % for points within one standard deviation of the "
               f"raw native waveform")
     # Recalculate the average and standard deviation with the filtered waves
-    filtered_waves_np = np.vstack(filtered_waves)
-    new_average_wave = np.mean(filtered_waves_np, axis=0)
-    new_std_wave = np.std(filtered_waves_np, axis=0)
+    if filtered_waves:
+        valid_beats = np.vstack(filtered_waves)
+        new_average_wave = np.mean(valid_beats, axis=0)
+        new_std_wave = np.std(valid_beats, axis=0)
+    else:
+        valid_beats = np.empty((0, len(x_common)), dtype=float)
+        new_average_wave = average_wave
+        new_std_wave = std_wave
     if verbose:
         _plot_average_wave(x_common, new_average_wave)
 
-    num_filtered_waves = filtered_waves_np.shape[0]
+    num_filtered_waves = valid_beats.shape[0]
     num_excluded_waves = len(excluded_waves)
 
     diagnostics = {
         "total_beats": total_beats,
         "num_beats_retained": num_filtered_waves,
-        "num_beats_excluded": num_excluded_waves
+        "num_beats_excluded": num_excluded_waves,
     }
 
-    return new_average_wave, x_common, diagnostics
+    return new_average_wave, x_common, valid_beats, diagnostics
 
 
 def _plot_detection_diagnostics(
