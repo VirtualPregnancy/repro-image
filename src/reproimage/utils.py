@@ -93,9 +93,10 @@ def mean_wave(x_values, y_values, verbose=False, return_valid_beats=False):
     :param x_values: numpy array of x values (typically time/sample position).
     :param y_values: numpy array of y values (waveform amplitude/velocity envelope).
     :param verbose: boolean controlling diagnostic plotting output.
-    :param return_valid_beats: if False (default), return (mean_y, x_common) only.
-        If True, also return valid_beats and diagnostics for per-beat analysis.
-    :return: (mean_y, x_common) or (mean_y, x_common, valid_beats, diagnostics).
+    :param return_valid_beats: if False (default), return (mean_y, x_common, diagnostics).
+        If True, also return valid_beats for per-beat PI/RI and related metrics.
+    :return: (mean_y, x_common, diagnostics) or
+        (mean_y, x_common, valid_beats, diagnostics).
     """
     ### 1) Propose anchor peaks, then merge peaks that are too close.
     wave_amplitude = y_values.max()-y_values.min()
@@ -392,7 +393,7 @@ def mean_wave(x_values, y_values, verbose=False, return_valid_beats=False):
 
     if return_valid_beats:
         return new_average_wave, x_common, valid_beats, diagnostics
-    return new_average_wave, x_common
+    return new_average_wave, x_common, diagnostics
 
 
 def _beat_ps_ed_mean(beat, late_diastolic_frac=0.6):
