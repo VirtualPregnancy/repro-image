@@ -348,13 +348,14 @@ def mean_wave(x_values, y_values, verbose=False, return_valid_beats=False):
 
     # Outlier rejection: keep beats with most samples within mean ± 20% of mean amplitude.
     threshold_percentage = 80
+    max_deviation = (100 - threshold_percentage) / 100
 
     filtered_waves = []
     excluded_waves = []
     count_excluded = 0
     for wave in interpolated_waves_np:
-        within_range = (wave >= (average_wave - 0.2 * amplitude_of_ave)) & (
-            wave <= (average_wave + 0.2 * amplitude_of_ave)
+        within_range = (wave >= (average_wave - max_deviation * amplitude_of_ave)) & (
+            wave <= (average_wave + max_deviation * amplitude_of_ave)
         )
         percentage_within_range = np.sum(within_range) / len(wave) * 100
         if percentage_within_range >= threshold_percentage:
@@ -368,7 +369,7 @@ def mean_wave(x_values, y_values, verbose=False, return_valid_beats=False):
     if verbose:
         print(
             f"{len(filtered_waves)} of {len(interpolated_waves)} beats retained "
-            f"(>={threshold_percentage}% samples within ±20% amplitude band)."
+            f"(>={threshold_percentage}% samples within ±{max_deviation * 100}% amplitude band)."
         )
     # Mean waveform from retained beats only.
     if filtered_waves:
