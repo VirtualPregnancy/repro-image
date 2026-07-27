@@ -948,6 +948,7 @@ class mosaic:
                     resampled_layer = resample.Execute(temp_layer)
 
                     destination = z_stack.TransformPhysicalPointToIndex(temp_layer.GetOrigin())
+                    print(f'Destination: {destination}')
                     paste_filter.SetSourceSize(resampled_layer.GetSize())
                     paste_filter.SetDestinationIndex(destination)
                     z_stack = paste_filter.Execute(z_stack, resampled_layer)
@@ -967,7 +968,7 @@ class mosaic:
             resample.SetOutputOrigin(z_stack.GetOrigin())
             resampled_img = resample.Execute(z_stack)
 
-            print("And here we are once again")
+            print("Mosaic has been successfully reconstructed")
 
         return resampled_img
 
