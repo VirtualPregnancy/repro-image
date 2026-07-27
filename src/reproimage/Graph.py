@@ -125,7 +125,7 @@ def give_me_tree(J_graph, full_graph, coords, segmentation_image):
             edge_JDF.append(max([J_graph.nodes[x]['JDF'] for x in [u,v]]))
             edge_len.append(len(edge_nodes))
             edge_eccen.append(eccentricty_path(edge_node_coords, perm_array_for_normals, seg_array))
-            edge_rad.append(radius_path(edge_node_coords, perm_array_for_normals, seg_array))
+            edge_rad.append(radius_path(edge_node_coords, perm_array_for_normals, segmentation_image))
             edges.append((u, v))
         normalised_rad = [1 - x/max(edge_rad) for x in edge_rad]
         normalised_length = [1-x/max(edge_len) for x in edge_len]
@@ -160,7 +160,7 @@ def eccentricty_path(pixel_coords, perm_array, seg_img):
         eccen.append(e_max/e_min)
     return np.mean(eccen)
 
-def radius_path(pixel_coords, perm_array, seg_img, metric='mean'):
+def radius_path(pixel_coords, perm_array, seg_img, metric='mean', useSpacing=False):
     """
     :param pixel_coords:
     :param perm_array:
@@ -174,7 +174,11 @@ def radius_path(pixel_coords, perm_array, seg_img, metric='mean'):
         if np.array([x==z for x,z in zip(pixel_coords[p], pixel_coords[p+1])]).all():
             edge_measure = 0
         else:
-            edge_measure = find_distances_using_normal(pixel_coords[p], pixel_coords[p+1],seg_img, perm_array)
+            if useSpacing:
+                edge_measure = find_distances_using_normal(pixel_coords[p], pixel_coords[p+1],sitk.GetArrayViewFromImage(seg_img), perm_array, useSpacing=useSpacing, spacing=np.array(seg_img.GetSpacing()))
+            else:
+                edge_measure = find_distances_using_normal(pixel_coords[p], pixel_coords[p + 1],
+                                                           sitk.GetArrayViewFromImage(seg_img), perm_array)
         radius.append(np.mean(edge_measure))
     if metric == 'mean':
         return np.mean(radius)
@@ -182,11 +186,11 @@ def radius_path(pixel_coords, perm_array, seg_img, metric='mean'):
         return max(radius)
 
 @jit(nopython=True)
-def find_distances_using_normal(coord1, coord2, VolumeImage, perm_array):
+def find_distances_using_normal(coord1, coord2, VolumeImage, perm_array, useSpacing=False, spacing=np.zeros(3)):
     """
     :param coord1:
     :param coord2:
-    :param VolumeImage:
+    :param VolumeImage: np.array
     :param perm_array:
     :return: the measured distances along various projected vectors along the line from coord1 to coord2, distance is
     distance from the line to the transition from a label of 1 to 0.
@@ -214,6 +218,14 @@ def find_distances_using_normal(coord1, coord2, VolumeImage, perm_array):
             normal[1] = -(centre[0] * normal[0] + centre[2] * normal[2]) / centre[1]
 
         normal = normal / np.linalg.norm(normal)
+        if useSpacing:
+            temp_var = np.zeros(3)
+            temp_var[0] = spacing[0]*normal[0]
+            temp_var[1] = spacing[1] * normal[1]
+            temp_var[2] = spacing[2] * normal[2]
+            normal_len = np.linalg.norm(temp_var)
+        else:
+            normal_len = 1
 
         # Find distances
         step = 0
@@ -234,8 +246,8 @@ def find_distances_using_normal(coord1, coord2, VolumeImage, perm_array):
                  currentValue = 0
              else:
                  currentValue = VolumeImage[int(currentPosition[0]), int(currentPosition[1]), int(currentPosition[2])]
-        distances[i] = step - 0.1
-    distances[distances == 0] = 0.5 # set the radius for points with a zero radius to half a voxel, as that is the
+        distances[i] = (step - 0.1)*normal_len
+    distances[distances == 0] = 0.5*normal_len # set the radius for points with a zero radius to half a voxel, as that is the
     # theoretical minimum radius
     return distances
 
@@ -343,7 +355,7 @@ def Strahler_numbering(di_graph :nx.DiGraph, inlet):
     nx.set_node_attributes(di_graph, strahler_mapping)
     return di_graph
 
-def get_graph_node_radii(graph, seg_img, coords, metric='mean', verbose = False, euclidean = False):
+def get_graph_node_radii(graph, seg_img, coords, metric='mean', verbose = False, euclidean = False, useSpacing = False):
     """
     Radii ordering is as for graph.nodes()
     :param graph:
@@ -357,6 +369,8 @@ def get_graph_node_radii(graph, seg_img, coords, metric='mean', verbose = False,
     distance.SetBackgroundValue(1)
     distance.SetInsideIsPositive(False)
     distance.SquaredDistanceOff()
+    if useSpacing:
+        distance.SetUseImageSpacing(useSpacing)
     distance_img = distance.Execute(seg_img)
     distance_img = sitk.GetArrayFromImage(distance_img)
     coords = np.round(coords)
@@ -366,7 +380,7 @@ def get_graph_node_radii(graph, seg_img, coords, metric='mean', verbose = False,
     euclid_radii = euclid_radii[[x for x in graph.nodes]]
     euclid_radii = np.squeeze(euclid_radii)
     if not euclidean:
-        edge_radii = get_graph_branch_radii(graph, seg_img, coords, metric, verbose = verbose)
+        edge_radii = get_graph_branch_radii(graph, seg_img, coords, metric, verbose = verbose, useSpacing=useSpacing)
         edges = graph.edges()
         edge_index_map = {}
         node_radii = []
@@ -393,11 +407,10 @@ def get_graph_node_radii(graph, seg_img, coords, metric='mean', verbose = False,
         node_radii = euclid_radii
     return np.array(node_radii)
 
-def get_graph_branch_radii(graph, seg_img, coords, metric='mean', verbose = False):
+def get_graph_branch_radii(graph, seg_img, coords, metric='mean', verbose = False, useSpacing=False):
     norm_vector_perms = np.array([0, -0.5, 0.5])
     perm_array_for_normals = cartesian_product(norm_vector_perms, norm_vector_perms)
     perm_array_for_normals = np.delete(perm_array_for_normals, 0, 0)
-    seg_array = sitk.GetArrayFromImage(seg_img)
     radius_scalars = []
     # enum = 0
     for edge in graph.edges():
@@ -415,7 +428,7 @@ def get_graph_branch_radii(graph, seg_img, coords, metric='mean', verbose = Fals
         if len(edge_nodes) == 1:
             edge_nodes = [u, edge_nodes[0], v]
         edge_coords = coords[edge_nodes]
-        radius_scalars.append(radius_path(edge_coords, perm_array_for_normals, seg_array, metric))
+        radius_scalars.append(radius_path(edge_coords, perm_array_for_normals, seg_img, metric,useSpacing=useSpacing))
     if verbose:
         print(len(radius_scalars))
     return radius_scalars
