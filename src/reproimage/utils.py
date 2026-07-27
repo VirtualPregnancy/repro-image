@@ -71,7 +71,7 @@ def confirm_directory(directory: Path):
         print(f"{directory} did not exist, it has been created")
     return
 
-def mean_wave(x_values, y_values, verbose=False):
+def mean_wave(x_values, y_values, verbose=False, return_valid_beats=False):
     """
     Compute an average beat waveform from a contiguous Doppler waveform.
 
@@ -93,7 +93,10 @@ def mean_wave(x_values, y_values, verbose=False):
     :param x_values: numpy array of x values (typically time/sample position).
     :param y_values: numpy array of y values (waveform amplitude/velocity envelope).
     :param verbose: boolean controlling diagnostic plotting output.
-    :return: a tuple in the form (average wave y values, averaged wave x values).
+    :param return_valid_beats: if False (default), return (mean_y, x_common, diagnostics).
+        If True, also return valid_beats for per-beat PI/RI and related metrics.
+    :return: (mean_y, x_common, diagnostics) or
+        (mean_y, x_common, valid_beats, diagnostics).
     """
     ### 1) Propose anchor peaks, then merge peaks that are too close.
     wave_amplitude = y_values.max()-y_values.min()
@@ -340,24 +343,24 @@ def mean_wave(x_values, y_values, verbose=False):
     # Calculate the initial average and standard deviation
     average_wave = np.mean(interpolated_waves_np, axis=0)
     std_wave = np.std(interpolated_waves_np, axis=0)
-    amplitude_of_ave = np.max(average_wave)-np.min(average_wave)
+    amplitude_of_ave = np.max(average_wave) - np.min(average_wave)
 
     if verbose:
         _plot_wave_set(x_common, interpolated_waves, average_wave, std_wave)
 
-    # Filter out waves outside the range of average ± standard deviation
+    # Outlier rejection: keep beats with most samples within mean ± 20% of mean amplitude.
     threshold_percentage = 80
+    max_deviation = (100 - threshold_percentage) / 100
 
     filtered_waves = []
     excluded_waves = []
     count_excluded = 0
 
     for wave in interpolated_waves_np:
-        # Calculate the percentage of points that meet the OR condition
-        within_range = (wave >= (average_wave - 0.2*amplitude_of_ave)) & (
-                    wave <= (average_wave + 0.2*amplitude_of_ave))  # Points above or equal to lower bound
+        within_range = (wave >= (average_wave - max_deviation * amplitude_of_ave)) & (
+            wave <= (average_wave + max_deviation * amplitude_of_ave)
+        )
         percentage_within_range = np.sum(within_range) / len(wave) * 100
-        # Include the wave if the percentage is above the threshold
         if percentage_within_range >= threshold_percentage:
             filtered_waves.append(wave)
         else:
@@ -367,27 +370,164 @@ def mean_wave(x_values, y_values, verbose=False):
         print("Waves filtered, num excluded", count_excluded)
 
     if verbose:
-        print(f"{len(filtered_waves)} waveforms included in the Calculation for the average waveform,"
-              f"using a cutoff proportion of {threshold_percentage} % for points within 20% of the mean waveform with "
-              f"average waveform amplitude as the distance raw native waveform")
-    # Recalculate the average and standard deviation with the filtered waves
-    filtered_waves_np = np.vstack(filtered_waves)
-    new_average_wave = np.mean(filtered_waves_np, axis=0)
-    new_std_wave = np.std(filtered_waves_np, axis=0)
-
+        print(
+            f"{len(filtered_waves)} of {len(interpolated_waves)} beats retained "
+            f"(>={threshold_percentage}% samples within ±{max_deviation * 100}% amplitude band)."
+        )
+    # Mean waveform from retained beats only.
+    if filtered_waves:
+        valid_beats = np.vstack(filtered_waves)
+        new_average_wave = np.mean(valid_beats, axis=0)
+        new_std_wave = np.std(valid_beats, axis=0)
+    else:
+        valid_beats = np.empty((0, len(x_common)), dtype=float)
+        new_average_wave = average_wave
+        new_std_wave = std_wave
+        
     if verbose:
         _plot_average_wave(x_common, new_average_wave)
 
-    num_filtered_waves = filtered_waves_np.shape[0]
+    num_filtered_waves = valid_beats.shape[0]
     num_excluded_waves = len(excluded_waves)
 
     diagnostics = {
         "total_beats": total_beats,
         "num_beats_retained": num_filtered_waves,
-        "num_beats_excluded": num_excluded_waves
+        "num_beats_excluded": num_excluded_waves,
     }
 
+    if return_valid_beats:
+        return new_average_wave, x_common, valid_beats, diagnostics
     return new_average_wave, x_common, diagnostics
+
+
+def _beat_ps_ed_mean(beat, late_diastolic_frac=0.6):
+    """
+    PSV, EDV, TAMV and sample indices for one aligned beat (one cardiac cycle).
+
+    PSV is the segment maximum. EDV is the minimum in the late diastolic limb after
+    PSV; ``late_diastolic_frac`` skips the early post-systolic region before that search.
+    TAMV is the mean over the beat (uniform time sampling assumed).
+
+    :param beat: 1D velocity envelope for one cycle.
+    :param late_diastolic_frac: fraction of the post-PSV interval to skip before EDV search.
+    :return: (ps, ed, mean_v, ps_idx, ed_idx)
+    """
+    beat = np.asarray(beat, dtype=float)
+    ps_idx = int(np.argmax(beat))
+    ps = float(beat[ps_idx])
+    mean_v = float(np.mean(beat))
+
+    post_len = beat.size - (ps_idx + 1)
+    if post_len > 0:
+        late_start = ps_idx + 1 + int(late_diastolic_frac * post_len)
+        late_start = min(late_start, beat.size - 1)
+        ed_rel = int(np.argmin(beat[late_start:]))
+        ed_idx = late_start + ed_rel
+        ed = float(beat[ed_idx])
+    else:
+        ed_idx = int(np.argmin(beat))
+        ed = float(beat[ed_idx])
+
+    return ps, ed, mean_v, ps_idx, ed_idx
+
+
+def _validate_valid_beats(valid_beats):
+    """Require a non-empty 2D valid_beats array."""
+    valid_beats = np.asarray(valid_beats, dtype=float)
+    if valid_beats.ndim != 2 or valid_beats.shape[0] == 0:
+        raise ValueError("valid_beats must be a non-empty 2D array (n_beats, n_samples).")
+    return valid_beats
+
+
+def _mean_per_beat(per_beat, index_name):
+    """Mean of finite per-beat values."""
+    finite = per_beat[np.isfinite(per_beat)]
+    if finite.size == 0:
+        raise ValueError(f"No beats yielded a finite {index_name}.")
+    return float(np.mean(finite)), int(finite.size)
+
+
+def compute_psv_edv(valid_beats, late_diastolic_frac=0.6):
+    """
+    PSV, EDV and TAMV for each row of ``valid_beats`` (``mean_wave`` output).
+
+    Uses the same picks as :func:`compute_pi` and :func:`compute_ri`.
+    ``psv``, ``edv`` and ``tamv`` are the mean of the per-beat values.
+
+    :param valid_beats: shape (n_beats, n_samples).
+    :param late_diastolic_frac: passed to :func:`_beat_ps_ed_mean`.
+    :return: dict with per-beat arrays, mean velocities, ``n_beats_used``,
+        and index arrays for plotting.
+    """
+    valid_beats = _validate_valid_beats(valid_beats)
+    n = valid_beats.shape[0]
+    psv = np.empty(n, dtype=float)
+    edv = np.empty(n, dtype=float)
+    tamv = np.empty(n, dtype=float)
+    ps_idx = np.empty(n, dtype=int)
+    ed_idx = np.empty(n, dtype=int)
+    for i, beat in enumerate(valid_beats):
+        ps, ed, mean_v, p_idx, e_idx = _beat_ps_ed_mean(beat, late_diastolic_frac)
+        psv[i] = ps
+        edv[i] = ed
+        tamv[i] = mean_v
+        ps_idx[i] = p_idx
+        ed_idx[i] = e_idx
+
+    psv_agg, n_used = _mean_per_beat(psv, "PSV")
+    edv_agg, _ = _mean_per_beat(edv, "EDV")
+    tamv_agg, _ = _mean_per_beat(tamv, "TAMV")
+
+    return {
+        "psv": psv_agg,
+        "edv": edv_agg,
+        "tamv": tamv_agg,
+        "psv_per_beat": psv,
+        "edv_per_beat": edv,
+        "tamv_per_beat": tamv,
+        "ps_idx_per_beat": ps_idx,
+        "ed_idx_per_beat": ed_idx,
+        "n_beats_used": n_used,
+    }
+
+
+def compute_pi(valid_beats):
+    """
+    Pulsatility index from rows of ``valid_beats`` (``mean_wave`` output).
+
+    Per beat: PI = (PSV - EDV) / TAMV. ``pi`` is the mean of per-beat values.
+
+    :param valid_beats: shape (n_beats, n_samples).
+    :return: dict with keys ``pi``, ``pi_per_beat``, ``n_beats_used``.
+    """
+    valid_beats = _validate_valid_beats(valid_beats)
+    pi_per_beat = np.empty(valid_beats.shape[0], dtype=float)
+    for i, beat in enumerate(valid_beats):
+        ps, ed, mean_v, _, _ = _beat_ps_ed_mean(beat)
+        pi_per_beat[i] = (ps - ed) / mean_v if mean_v > 0 else np.nan
+
+    pi, n_used = _mean_per_beat(pi_per_beat, "PI")
+    return {"pi": pi, "pi_per_beat": pi_per_beat, "n_beats_used": n_used}
+
+
+def compute_ri(valid_beats):
+    """
+    Resistance index from rows of ``valid_beats`` (``mean_wave`` output).
+
+    Per beat: RI = (PSV - EDV) / PSV. ``ri`` is the mean of per-beat values.
+
+    :param valid_beats: shape (n_beats, n_samples).
+    :return: dict with keys ``ri``, ``ri_per_beat``, ``n_beats_used``.
+    """
+    valid_beats = _validate_valid_beats(valid_beats)
+    ri_per_beat = np.empty(valid_beats.shape[0], dtype=float)
+    for i, beat in enumerate(valid_beats):
+        ps, ed, _mean_v, _, _ = _beat_ps_ed_mean(beat)
+        ri_per_beat[i] = (ps - ed) / ps if ps > 0 else np.nan
+
+    ri, n_used = _mean_per_beat(ri_per_beat, "RI")
+    return {"ri": ri, "ri_per_beat": ri_per_beat, "n_beats_used": n_used}
 
 
 def _plot_detection_diagnostics(
